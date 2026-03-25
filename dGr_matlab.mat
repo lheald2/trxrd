@@ -1,0 +1,218 @@
+% Atomic form factor of BaTiO3 vs Q for X-rays at 31.2 keV
+ 
+clear; clc;
+ 
+%% constants
+
+E_keV = 31.2;
+
+lambda = 12.39842 / E_keV;   % wavelength in Angstrom
+ 
+Q = linspace(0,25,500);      % scattering vector magnitude (1/Angstrom)
+
+s = Q/(4*pi);
+ 
+%% Cromer-Mann coefficients [a1 a2 a3 a4 b1 b2 b3 b4 c]
+ 
+Ba = [20.1807 19.1136 10.9054 0.77634 ...
+
+      3.21367 0.28331 20.0558 51.746 ...
+
+      3.02902];
+ 
+Ti = [9.7595 7.3558 1.6991 1.9021 ...
+
+      7.8508 0.5 35.6338 116.105 ...
+
+      1.2807];
+ 
+O  = [3.0485 2.2868 1.5463 0.867 ...
+
+      13.2771 5.7011 0.3239 32.9089 ...
+
+      0.2508];
+ 
+%% form factor function
+
+ff = @(p,s) p(1)*exp(-p(5)*s.^2) + ...
+
+            p(2)*exp(-p(6)*s.^2) + ...
+
+            p(3)*exp(-p(7)*s.^2) + ...
+
+            p(4)*exp(-p(8)*s.^2) + ...
+
+            p(9);
+ 
+%% atomic form factors
+
+f_Ba = ff(Ba,s);
+
+f_Ti = ff(Ti,s);
+
+f_O  = ff(O,s);
+ 
+%% BaTiO3 total
+
+F_total = f_Ba + f_Ti + 3*f_O;
+
+% atomic fractions
+
+c_Ba = 1/5;
+
+c_Ti = 1/5;
+
+c_O  = 3/5;
+ 
+% <f>
+
+f_avg = c_Ba*f_Ba + c_Ti*f_Ti + c_O*f_O;
+ 
+% <f^2>
+
+f2_avg = c_Ba*(f_Ba.^2) + c_Ti*(f_Ti.^2) + c_O*(f_O.^2);
+
+%% plot
+
+figure
+
+plot(Q,f_Ba,'LineWidth',1.5); hold on
+
+plot(Q,f_Ti,'LineWidth',1.5)
+
+plot(Q,f_O,'LineWidth',1.5)
+
+plot(Q,F_total,'k','LineWidth',2)
+ 
+xlabel('Q (Å^{-1})')
+
+ylabel('Atomic Form Factor f(Q)')
+
+legend('Ba','Ti','O','BaTiO3 total')
+
+grid on
+ 
+ 
+%%
+ 
+ 
+r = linspace(0,50,2000);   % Å
+
+Q = Qexp;
+
+Qmax = max(Q);
+
+M = sin(pi*Q/Qmax)./(pi*Q/Qmax);
+
+M(Q==0) = 1;
+
+deltaFQ = deltaFQ .* M;
+ 
+deltaG = zeros(size(r));
+ 
+for i = 1:length(r)
+
+    deltaG(i) = trapz(Q, deltaFQ .* sin(Q*r(i)));
+
+end
+ 
+deltaG = (2/pi) * deltaG;
+ 
+figure
+
+plot(r, deltaG,'LineWidth',2)
+
+xlabel('r (Å)')
+
+ylabel('\DeltaG(r)')
+
+grid on
+ 
+ 
+%%
+ 
+%% Paste data from Origin here
+
+% columns: Qexp, deltaF(-5ns), deltaF(0.6ns)
+ 
+%data = []
+ 
+Q = data(:,1);
+
+dF_neg5ns = data(:,2);
+
+dF_06ns   = data(:,3);
+ 
+% choose which delay to transform
+
+deltaFQ = dF_06ns;%dF_neg5ns; %dF_06ns;     % change to dF_neg5ns if needed
+ 
+% choose Qmax cutoff
+
+Qmax_user = 16;        % Å^-1 (adjust this freely)
+ 
+% select valid Q range
+
+idx = Q <= Qmax_user;
+
+Q = Q(idx);
+
+deltaFQ = deltaFQ(idx);
+ 
+% apply Lorch window to reduce ripples
+
+Qmax = max(Q);
+
+M = sin(pi*Q/Qmax)./(pi*Q/Qmax);
+
+M(Q==0)=1;
+ 
+deltaFQ = deltaFQ .* M;
+ 
+% r grid
+
+rmax = 40;
+
+Nr = 2000;
+
+r = linspace(0,rmax,Nr);
+ 
+% compute ?G(r)
+
+deltaG = zeros(size(r));
+ 
+for i = 1:length(r)
+
+    deltaG(i) = trapz(Q, deltaFQ .* sin(Q*r(i)));
+
+end
+ 
+deltaG = (2/pi)*deltaG;
+ 
+% plot
+
+%figure
+
+plot(r,deltaG,'LineWidth',2)
+
+xlabel('r (Å)')
+
+ylabel('\DeltaG(r)')
+
+title(['Q_{max} = ',num2str(Qmax_user),' Å^{-1}'])
+
+grid on
+
+hold on;
+ 
+plot(batio(:,1),batio(:,2)/1E7+0.3E-5,'LineWidth',2)
+
+xlabel('r (Å)')
+
+ylabel('\DeltaG(r)')
+
+title(['Q_{max} = ',num2str(Qmax_user),' Å^{-1}'])
+
+grid on
+
+ 
