@@ -21,16 +21,16 @@ MAX_PROCESSORS = 4
 # Global detector / beam configuration
 # Edit these defaults for your instrument
 # ============================================================
-CENTER_X = 746
-CENTER_Y = 1621
+CENTER_X = 44.5
+CENTER_Y = 1665
 PIXEL1 = 1.72e-4                 # m, detector pixel size along rows (y)
 PIXEL2 = 1.72e-4                 # m, detector pixel size along cols (x)
-DISTANCE = 0.1885              # m, sample-to-detector distance
-WAVELENGTH = 1.0596937286439283e-10          # m
+DISTANCE = 0.17236             # m, sample-to-detector distance
+WAVELENGTH = 0.39738514824147314e-10          # m
 
 # Detector orientation
-TILT_ANGLE = np.deg2rad(-0.16433)               # rad
-TILT_PLANE_ROTATION = np.deg2rad(72.12779)      # rad
+TILT_ANGLE = np.deg2rad(0)               # rad
+TILT_PLANE_ROTATION = np.deg2rad(90)      # rad
 ROT3 = 0.0                      # rad, in-plane detector rotation
 
 # Optional corrections

@@ -139,8 +139,8 @@ def get_image_details(
     if not folder.is_dir():
         raise ValueError(f"Path is not a directory: {folder}")
 
-    file_names = sorted(folder.glob("*.tif"))
-    print(f"{len(file_names)} TIFF files found in {folder}.")
+    file_names = sorted(folder.glob(f"{sample_name}*.tif"))
+    print(f"{len(file_names)} TIFF files found in {folder} with scan name {sample_name}.")
 
     if len(file_names) == 0:
         raise ValueError(f"No .tif files found in folder: {folder}")
