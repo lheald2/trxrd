@@ -88,7 +88,6 @@ def _parse_filename(file_name):
     sample_name = match.group("sample_name")
     fluence = float(match.group("fluence"))
     delay = float(match.group("delay"))
-    delay = -delay  # Positive delay means pump arrives before probe
     image_number = int(match.group("image_number"))
 
     return sample_name, fluence, delay, image_number
@@ -96,9 +95,10 @@ def _parse_filename(file_name):
 
 def get_image_details(
     folder_path,
-    sample_name=None,
+    sample_name=SCAN_NAME,
     sort=True,
     filter_data=False,
+    delay_sign=DELAY_SIGN,
     plot=False,
 ):
     """
@@ -181,7 +181,7 @@ def get_image_details(
 
     sample_names = np.array(sample_names, dtype=str)
     fluence = np.array(fluence, dtype=float)
-    delay = np.array(delay, dtype=float)
+    delay = delay_sign * np.array(delay, dtype=float)
     image_number = np.array(image_number, dtype=int)
     cleaned_files = np.array(cleaned_files, dtype=str)
 
@@ -464,6 +464,122 @@ def remove_counts(
     return filtered_data
 
 
+def average_images_by_delay(
+    data_dict,
+    return_dict=True,
+):
+    """
+    Group images by delay and compute the mean image for each delay.
+
+    This function is intended to be used after filtering out bad images,
+    for example after `remove_counts(...)`. It averages all remaining images
+    that share the same delay value, producing one mean image per delay.
+
+    Parameters
+    ----------
+    data_dict : dict
+        Dictionary containing at least:
+        - "images" : np.ndarray of shape (n_images, rows, cols)
+        - "delay" : np.ndarray of shape (n_images,)
+
+        It may also contain other per-image metadata such as:
+        - "file_names"
+        - "image_number"
+        - "sample_name"
+        - "counts"
+        - "fluence"
+    return_dict : bool, optional
+        If True, return a dictionary.
+        If False, return tuple-style outputs.
+
+    Returns
+    -------
+    result : dict or tuple
+        If return_dict=True:
+            {
+                "images": np.ndarray of shape (n_delays, rows, cols),
+                "std_images": np.ndarray of shape (n_delays, rows, cols),
+                "delay": np.ndarray of shape (n_delays,),
+                "counts_per_delay": np.ndarray of shape (n_delays,),
+                "indices_by_delay": dict,
+                "grouped_file_names": dict,
+                "grouped_image_numbers": dict,
+            }
+
+        If return_dict=False:
+            (unique_delays, mean_images, std_images, counts_per_delay)
+
+    Raises
+    ------
+    ValueError
+        If required keys are missing or shapes are inconsistent.
+
+    Notes
+    -----
+    - The output "images" are the mean images for each delay.
+    - "std_images" contains the standard deviation across images within each delay.
+    - "grouped_file_names" and "grouped_image_numbers" keep traceability to the
+      original files, but are stored as dictionaries because each delay may
+      correspond to many input files.
+    """
+    required_keys = ["images", "delay"]
+    for key in required_keys:
+        if key not in data_dict:
+            raise ValueError(f"data_dict is missing required key: '{key}'")
+
+    images = np.asarray(data_dict["images"], dtype=float)
+    delays = np.asarray(data_dict["delay"], dtype=float)
+
+    if images.ndim != 3:
+        raise ValueError("data_dict['images'] must be 3D with shape (n_images, rows, cols).")
+    if delays.ndim != 1:
+        raise ValueError("data_dict['delay'] must be 1D.")
+    if images.shape[0] != len(delays):
+        raise ValueError("Number of images must match number of delay values.")
+
+    unique_delays = np.array(sorted(np.unique(delays)), dtype=float)
+
+    mean_images = []
+    std_images = []
+    counts_per_delay = []
+    indices_by_delay = {}
+    grouped_file_names = {}
+    grouped_image_numbers = {}
+
+    for delay_val in unique_delays:
+        idx = np.where(delays == delay_val)[0]
+        indices_by_delay[delay_val] = idx
+        counts_per_delay.append(len(idx))
+
+        group = images[idx]
+        mean_images.append(np.nanmean(group, axis=0))
+        std_images.append(np.nanstd(group, axis=0))
+
+        if "file_names" in data_dict:
+            grouped_file_names[delay_val] = data_dict["file_names"][idx]
+        if "image_number" in data_dict:
+            grouped_image_numbers[delay_val] = data_dict["image_number"][idx]
+
+    mean_images = np.asarray(mean_images, dtype=float)
+    std_images = np.asarray(std_images, dtype=float)
+    counts_per_delay = np.asarray(counts_per_delay, dtype=int)
+
+    grouped_dict = {
+        "images": mean_images,
+        "std_images": std_images,
+        "delay": unique_delays,
+        "counts_per_delay": counts_per_delay,
+        "indices_by_delay": indices_by_delay,
+        "grouped_file_names": grouped_file_names,
+        "grouped_image_numbers": grouped_image_numbers,
+    }
+
+    if return_dict:
+        return grouped_dict
+
+    return unique_delays, mean_images, std_images, counts_per_delay
+
+
 def _as_image_stack(images, name="images"):
     """
     Convert a 2D image or 3D image stack into a 3D stack.
@@ -507,6 +623,18 @@ def _normalize_centers_xy(centers, n_images, use_average_center=False):
         )
 
     return centers_out
+
+
+def yx_to_xy(center_yx):
+    """Convert image-order center (y, x) -> pyFAI-order center (x, y)."""
+    cy, cx = center_yx
+    return (float(cx), float(cy))
+
+
+def xy_to_yx(center_xy):
+    """Convert pyFAI-order center (x, y) -> image-order center (y, x)."""
+    cx, cy = center_xy
+    return (float(cy), float(cx))
 
 
 def load_background(
@@ -700,9 +828,153 @@ def subtract_background(
     }
 
 
+def make_circular_mask(
+        image_shape, 
+        center_xy=(MASK_CENTER_X, MASK_CENTER_Y), 
+        radius=MASK_RADIUS
+):
+    """
+    Create a circular boolean mask.
+
+    Parameters
+    ----------
+    image_shape : tuple
+        Image shape as (rows, cols).
+    center_xy : tuple
+        Circle center as (x0, y0) in pixel coordinates.
+    radius : float
+        Radius in pixels.
+
+    Returns
+    -------
+    mask_bool : np.ndarray
+        2D boolean mask where True indicates masked pixels.
+    """
+    rows, cols = image_shape
+    y, x = np.indices((rows, cols))
+    x0, y0 = center_xy
+
+    r = np.sqrt((x - x0)**2 + (y - y0)**2)
+    mask_bool = r <= radius
+
+    return mask_bool
+
+
+def apply_beamstop_mask(
+    data_array,
+    center_xy=(MASK_CENTER_X, MASK_CENTER_Y),
+    radius=MASK_RADIUS,
+    plot=False,
+    image_index=0,
+    figsize=FIGSIZE,
+    use_shared_color_scale=True,
+):
+    """
+    Apply a circular beam stop mask to image data, replacing masked pixels with NaN.
+
+    This function accepts either a single 2D image or a 3D image stack.
+    Internally, the input is converted to a stack using `_as_image_stack`,
+    the circular mask is broadcast across all images, and the original
+    dimensionality is restored before returning.
+
+    Parameters
+    ----------
+    data_array : np.ndarray
+        Input image data, either:
+        - 2D: (rows, cols)
+        - 3D: (n_images, rows, cols)
+    center_xy : tuple
+        Beam center as (x0, y0) in pixel coordinates.
+    radius : float
+        Beam stop mask radius in pixels.
+    plot : bool, optional
+        If True, plot an example original image and masked image, with the
+        beam stop mask overlaid on the original.
+    image_index : int, optional
+        Which image to plot if the input is a stack.
+        If the input is a single 2D image, image_index must be 0.
+    figsize : tuple, optional
+        Figure size for the example plot.
+    use_shared_color_scale : bool, optional
+        If True, use the same color scale for the original and masked images.
+
+    Returns
+    -------
+    masked_data : np.ndarray
+        Float copy of input data with beam stop region set to NaN.
+        Returns:
+        - 2D array if input was 2D
+        - 3D array if input was 3D
+
+    Raises
+    ------
+    ValueError
+        If the input dimensions are invalid, or if image_index is out of bounds.
+    """
+    image_stack, input_was_2d = _as_image_stack(data_array, name="data_array")
+    n_images = image_stack.shape[0]
+    image_shape = image_stack.shape[1:]
+
+    if not (0 <= image_index < n_images):
+        raise ValueError(
+            f"image_index={image_index} is out of bounds for {n_images} image(s)."
+        )
+
+    mask_bool = make_circular_mask(
+        image_shape=image_shape,
+        center_xy=center_xy,
+        radius=radius,
+    )
+
+    masked_stack = image_stack.astype(float, copy=True)
+    masked_stack = np.where(mask_bool[None, :, :], np.nan, masked_stack)
+
+    if plot:
+        original_image = image_stack[image_index]
+        masked_image = masked_stack[image_index]
+
+        # Use log scale
+        log_original = np.log1p(original_image)
+        log_masked = np.log1p(masked_image)
+
+        if use_shared_color_scale:
+            finite_vals = log_original[np.isfinite(log_original)]
+            vmin = np.nanmin(finite_vals)
+            vmax = np.nanmax(finite_vals)
+        else:
+            vmin = None
+            vmax = None
+
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+        # Original (log scale) + mask overlay
+        im0 = axes[0].imshow(log_original, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[0].contour(mask_bool, levels=[0.5], colors="white", linewidths=1.5)
+        axes[0].scatter(
+            [center_xy[0]], [center_xy[1]],
+            color="white", s=20, marker="x"
+        )
+        axes[0].set_title("Log Image with Beam Stop Mask")
+        axes[0].set_xlabel("Pixel")
+        axes[0].set_ylabel("Pixel")
+        plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+        # Masked (log scale)
+        im1 = axes[1].imshow(log_masked, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[1].set_title("Log Masked Image")
+        axes[1].set_xlabel("Pixel")
+        axes[1].set_ylabel("Pixel")
+        plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        plt.show()
+
+    return _restore_image_dimensionality(masked_stack, input_was_2d)
+
+
 def apply_nan_mask(
     data_array,
-    mask_path,
+    mask_path = MASK_FILE,
     plot=False,
     image_index=0,
     figsize=FIGSIZE,
@@ -773,8 +1045,11 @@ def apply_nan_mask(
         original_image = image_stack[image_index]
         masked_image = masked_stack[image_index]
 
+        log_original = np.log1p(original_image)
+        log_masked = np.log1p(masked_image)
+
         if use_shared_color_scale:
-            finite_vals = original_image[np.isfinite(original_image)]
+            finite_vals = log_original[np.isfinite(log_original)]
             vmin = np.nanmin(finite_vals)
             vmax = np.nanmax(finite_vals)
         else:
@@ -783,14 +1058,14 @@ def apply_nan_mask(
 
         fig, axes = plt.subplots(1, 2, figsize=figsize)
 
-        im0 = axes[0].imshow(original_image, cmap="jet", vmin=vmin, vmax=vmax)
-        axes[0].set_title("Original Image")
+        im0 = axes[0].imshow(log_original, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[0].set_title("Log Original Image")
         axes[0].set_xlabel("Pixel")
         axes[0].set_ylabel("Pixel")
         plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
-        im1 = axes[1].imshow(masked_image, cmap="jet", vmin=vmin, vmax=vmax)
-        axes[1].set_title("Masked Image")
+        im1 = axes[1].imshow(log_masked, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[1].set_title("Log Masked Image")
         axes[1].set_xlabel("Pixel")
         axes[1].set_ylabel("Pixel")
         plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
@@ -1222,7 +1497,7 @@ def _profile_sharpness_score(profile):
 
 def find_diffraction_center_from_guess_radial_fast(
     image,
-    center_guess,
+    center_guess_yx,
     search_radius=20,
     mask=None,
     r_min=0,
@@ -1240,7 +1515,7 @@ def find_diffraction_center_from_guess_radial_fast(
     ----------
     image : np.ndarray
         2D diffraction image.
-    center_guess : tuple
+    center_guess_yx : tuple
         Initial guess as (cy, cx).
     search_radius : int
         Search radius around guessed center.
@@ -1273,19 +1548,21 @@ def find_diffraction_center_from_guess_radial_fast(
 
     downsample = int(downsample)
     img = image.astype(float, copy=False)
+    guess_cy, guess_cx = center_guess_yx
 
     if downsample > 1:
         img_work = img[::downsample, ::downsample]
         mask_work = None if mask is None else mask[::downsample, ::downsample]
-        guess_y = center_guess[0] / downsample
-        guess_x = center_guess[1] / downsample
+        guess_cy_work = guess_cy / downsample
+        guess_cx_work = guess_cx / downsample
         search_radius_work = max(1, int(np.ceil(search_radius / downsample)))
         r_min_work = r_min / downsample
         r_max_work = None if r_max is None else r_max / downsample
     else:
         img_work = img
         mask_work = mask
-        guess_y, guess_x = center_guess
+        guess_cy_work = guess_cy
+        guess_cx_work = guess_cx
         search_radius_work = search_radius
         r_min_work = r_min
         r_max_work = r_max
@@ -1298,18 +1575,18 @@ def find_diffraction_center_from_guess_radial_fast(
     )
 
     cy_values = np.arange(
-        int(np.round(guess_y)) - search_radius_work,
-        int(np.round(guess_y)) + search_radius_work + 1,
+        int(np.round(guess_cy_work)) - search_radius_work,
+        int(np.round(guess_cy_work)) + search_radius_work + 1,
     )
     cx_values = np.arange(
-        int(np.round(guess_x)) - search_radius_work,
-        int(np.round(guess_x)) + search_radius_work + 1,
+        int(np.round(guess_cx_work)) - search_radius_work,
+        int(np.round(guess_cx_work)) + search_radius_work + 1,
     )
 
     score_map = np.full((len(cy_values), len(cx_values)), -np.inf, dtype=float)
 
     best_score = -np.inf
-    best_center = None
+    best_center_yx_work = None
     best_r = None
     best_profile = None
 
@@ -1331,25 +1608,27 @@ def find_diffraction_center_from_guess_radial_fast(
 
             if score > best_score:
                 best_score = score
-                best_center = (cy, cx)
+                best_center_yx_work = (cy, cx)
                 best_r = r
                 best_profile = profile
 
-    if best_center is None:
+    if best_center_yx_work is None:
         raise RuntimeError("Could not determine a valid center.")
 
-    best_cy_work, best_cx_work = best_center
+    best_cy_work, best_cx_work = best_center_yx_work
 
     if downsample > 1:
-        best_center_full = (best_cy_work * downsample, best_cx_work * downsample)
+        best_center_yx = (best_cy_work * downsample, best_cx_work * downsample)
         best_r_full = best_r * downsample
         cy_values_full = cy_values * downsample
         cx_values_full = cx_values * downsample
     else:
-        best_center_full = best_center
+        best_center_yx = best_center_yx_work
         best_r_full = best_r
         cy_values_full = cy_values
         cx_values_full = cx_values
+
+    best_center_xy = yx_to_xy(best_center_yx)
 
     if plot:
         fig, axes = plt.subplots(1, 3, figsize=figsize)
@@ -1357,8 +1636,8 @@ def find_diffraction_center_from_guess_radial_fast(
         img_plot = np.nan_to_num(img, nan=0.0)
 
         axes[0].imshow(img_plot, cmap="inferno")
-        axes[0].plot(center_guess[1], center_guess[0], "co", label="Guess")
-        axes[0].plot(best_center_full[1], best_center_full[0], "r+", ms=12, mew=2, label="Best")
+        axes[0].plot(guess_cx, guess_cy, "co", label="Guess")
+        axes[0].plot(best_center_xy[0], best_center_xy[1], "r+", ms=12, mew=2, label="Best")
         axes[0].set_title("Image with Center")
         axes[0].legend()
 
@@ -1369,8 +1648,8 @@ def find_diffraction_center_from_guess_radial_fast(
             extent=[cx_values_full[0], cx_values_full[-1], cy_values_full[0], cy_values_full[-1]],
             cmap="viridis",
         )
-        axes[1].plot(center_guess[1], center_guess[0], "co", label="Guess")
-        axes[1].plot(best_center_full[1], best_center_full[0], "r+", ms=12, mew=2, label="Best")
+        axes[1].plot(guess_cx, guess_cy, "co", label="Guess")
+        axes[1].plot(best_center_xy[0], best_center_xy[1], "r+", ms=12, mew=2, label="Best")
         axes[1].set_xlabel("cx")
         axes[1].set_ylabel("cy")
         axes[1].set_title("Score Map")
@@ -1391,10 +1670,11 @@ def find_diffraction_center_from_guess_radial_fast(
         plt.show()
 
     return {
-        "center_yx": best_center_full,
-        "center_y": best_center_full[0],
-        "center_x": best_center_full[1],
-        "score": best_score,
+        "center_yx": np.asarray(best_center_yx, dtype=float),
+        "center_xy": np.asarray(best_center_xy, dtype=float),
+        "center_y": float(best_center_yx[0]),
+        "center_x": float(best_center_yx[1]),
+        "score": float(best_score),
         "score_map": score_map,
         "cy_values": cy_values_full,
         "cx_values": cx_values_full,
@@ -1406,7 +1686,7 @@ def find_diffraction_center_from_guess_radial_fast(
 def _center_worker(
     idx,
     image,
-    center_guess,
+    center_guess_yx,
     search_radius,
     mask,
     r_min,
@@ -1420,7 +1700,7 @@ def _center_worker(
     """
     result = find_diffraction_center_from_guess_radial_fast(
         image=image,
-        center_guess=center_guess,
+        center_guess_yx=center_guess_yx,
         search_radius=search_radius,
         mask=mask,
         r_min=r_min,
@@ -1431,19 +1711,23 @@ def _center_worker(
         plot=False,
     )
 
-    cy, cx = result["center_yx"]
+    center_yx = np.asarray(result["center_yx"], dtype=float)
+    center_xy = np.asarray(result["center_xy"], dtype=float)
+
     return {
         "index": idx,
-        "center_y": cy,
-        "center_x": cx,
-        "score": result["score"],
+        "center_yx": center_yx,
+        "center_xy": center_xy,
+        "center_y": float(center_yx[0]),
+        "center_x": float(center_yx[1]),
+        "score": float(result["score"]),
         "full_result": result,
     }
 
 
 def find_centers_in_stack_radial_parallel(
     data_array,
-    center_guess=(CENTER_Y, CENTER_X),
+    center_guess_yx=(CENTER_Y, CENTER_X),
     search_radius=20,
     center_mask=None,
     r_min=0,
@@ -1461,7 +1745,12 @@ def find_centers_in_stack_radial_parallel(
     figsize_trend=FIGSIZE,
     **kwargs,
 ):
-    """Find diffraction centers for one image or a stack of images in parallel."""
+    """
+    Find diffraction centers for one image or a stack of images in parallel.
+
+    Internal center convention is (y, x). Returned dict includes both
+    centers_yx and centers_xy.
+    """
     if "mask" in kwargs and center_mask is None:
         center_mask = kwargs.pop("mask")
     if kwargs:
@@ -1479,7 +1768,7 @@ def find_centers_in_stack_radial_parallel(
                 _center_worker,
                 idx=idx,
                 image=image_stack[idx],
-                center_guess=center_guess,
+                center_guess_yx=center_guess_yx,
                 search_radius=search_radius,
                 mask=center_mask,
                 r_min=r_min,
@@ -1506,9 +1795,11 @@ def find_centers_in_stack_radial_parallel(
 
     print("Done finding centers.")
 
-    center_y = np.array([d["center_y"] for d in results_list], dtype=float)
-    center_x = np.array([d["center_x"] for d in results_list], dtype=float)
-    centers_xy = np.column_stack((center_x, center_y))
+    centers_yx = np.vstack([d["center_yx"] for d in results_list]).astype(float)
+    centers_xy = np.vstack([d["center_xy"] for d in results_list]).astype(float)
+
+    center_y = centers_yx[:, 0]
+    center_x = centers_yx[:, 1]
     score = np.array([d["score"] for d in results_list], dtype=float)
     image_index = np.arange(n_images)
     per_image_results = [d["full_result"] for d in results_list]
@@ -1524,8 +1815,8 @@ def find_centers_in_stack_radial_parallel(
         fig, axes = plt.subplots(1, 3, figsize=figsize_example)
 
         axes[0].imshow(img_plot, cmap="inferno")
-        axes[0].plot(center_guess[1], center_guess[0], "co", label="Fixed guess")
-        axes[0].plot(center_x[example_index], center_y[example_index], "r+", ms=12, mew=2, label="Best")
+        axes[0].plot(center_guess_yx[1], center_guess_yx[0], "co", label="Fixed guess")
+        axes[0].plot(centers_xy[example_index, 0], centers_xy[example_index, 1], "r+", ms=12, mew=2, label="Best")
         axes[0].set_title(f"Example Image {example_index}")
         axes[0].legend()
 
@@ -1541,8 +1832,8 @@ def find_centers_in_stack_radial_parallel(
             ],
             cmap="viridis",
         )
-        axes[1].plot(center_guess[1], center_guess[0], "co", label="Fixed guess")
-        axes[1].plot(center_x[example_index], center_y[example_index], "r+", ms=12, mew=2, label="Best")
+        axes[1].plot(center_guess_yx[1], center_guess_yx[0], "co", label="Fixed guess")
+        axes[1].plot(centers_xy[example_index, 0], centers_xy[example_index, 1], "r+", ms=12, mew=2, label="Best")
         axes[1].set_xlabel("cx")
         axes[1].set_ylabel("cy")
         axes[1].set_title("Score Map")
@@ -1570,7 +1861,7 @@ def find_centers_in_stack_radial_parallel(
         axes[0].set_title("Center Position vs Image")
         axes[0].grid(True, alpha=0.3)
 
-        axes[1].plot(xvals, center_y, "o-", color="tab:orange")
+        axes[1].plot(xvals, center_y, "o-")
         axes[1].set_xlabel(xlabel)
         axes[1].set_ylabel("Center y (pixels)")
         axes[1].grid(True, alpha=0.3)
@@ -1581,6 +1872,7 @@ def find_centers_in_stack_radial_parallel(
     return {
         "center_y": center_y,
         "center_x": center_x,
+        "centers_yx": centers_yx,
         "centers_xy": centers_xy,
         "score": score,
         "image_index": image_index,
@@ -1619,7 +1911,7 @@ def tilt_to_rotations(tilt_angle, tilt_plane_rotation, rot3=0.0):
 
 
 def make_azimuthal_integrator(
-    center,
+    center_xy,
     pixel1=PIXEL1,
     pixel2=PIXEL2,
     distance=DISTANCE,
@@ -1633,7 +1925,7 @@ def make_azimuthal_integrator(
 
     Parameters
     ----------
-    center : tuple or array-like
+    center_xy : tuple or array-like
         (x_center, y_center) in pixel coordinates.
     pixel1, pixel2 : float, optional
         Pixel sizes in meters.
@@ -1653,7 +1945,7 @@ def make_azimuthal_integrator(
     ai : AzimuthalIntegrator
         Configured pyFAI integrator.
     """
-    x_center, y_center = center
+    x_center, y_center = center_xy
 
     poni1 = y_center * pixel1
     poni2 = x_center * pixel2
@@ -1722,7 +2014,7 @@ def build_pyfai_mask(image, mask=None):
 def _azimuthal_worker(
     idx,
     image,
-    center,
+    center_xy,
     npt,
     unit,
     radial_range,
@@ -1751,7 +2043,7 @@ def _azimuthal_worker(
         Image index (used for ordering results).
     image : np.ndarray
         2D diffraction image.
-    center : array-like
+    center_xy : array-like
         (x_center, y_center) for this image.
     npt : int
         Number of radial bins.
@@ -1805,7 +2097,7 @@ def _azimuthal_worker(
     """
     try:
         ai = make_azimuthal_integrator(
-            center=center,
+            center_xy=center_xy,
             pixel1=pixel1,
             pixel2=pixel2,
             distance=distance,
@@ -1832,13 +2124,11 @@ def _azimuthal_worker(
 
         intensity = np.asarray(intensity, dtype=float)
 
-        # Post-integration masking in radial space
         if nan_radial_range is not None:
             if len(nan_radial_range) != 2:
                 raise ValueError("nan_radial_range must be a tuple: (rmin, rmax)")
 
             rmin_nan, rmax_nan = nan_radial_range
-
             keep_mask = np.ones_like(radial, dtype=bool)
             if rmin_nan is not None:
                 keep_mask &= radial >= rmin_nan
@@ -1875,12 +2165,12 @@ def _azimuthal_worker(
 
 def azimuthal_average_pyfai(
     images,
-    centers,
+    centers_xy,
     use_average_center=False,
     npt=5000,
-    unit="q_A^-1",
+    unit=UNIT,
     radial_range=None,
-    nan_radial_range=None,
+    nan_radial_range=(NAN_MIN, NAN_MAX),
     azimuth_range=None,
     integration_mask=None,
     dark=DARK,
@@ -1907,10 +2197,10 @@ def azimuthal_average_pyfai(
     ----------
     images : np.ndarray
         2D image or 3D image stack.
-    centers : tuple or np.ndarray
+    centers_xy : tuple or np.ndarray
         Center(s) in (x, y) pixel coordinates.
     use_average_center : bool, optional
-        If True and centers are provided per-image, average them and use one
+        If True and centers_xy are provided per-image, average them and use one
         center for all images.
     npt : int, optional
         Number of radial bins.
@@ -1977,8 +2267,8 @@ def azimuthal_average_pyfai(
     image_stack, input_was_2d = _as_image_stack(images, name="images")
     n_images = image_stack.shape[0]
 
-    centers_used = _normalize_centers_xy(
-        centers,
+    centers_used_xy = _normalize_centers_xy(
+        centers_xy,
         n_images=n_images,
         use_average_center=use_average_center,
     )
@@ -2009,7 +2299,7 @@ def azimuthal_average_pyfai(
                 _azimuthal_worker,
                 idx=idx,
                 image=image_stack[idx],
-                center=centers_used[idx],
+                center_xy=centers_used_xy[idx],
                 npt=npt,
                 unit=unit,
                 radial_range=radial_range,
@@ -2071,7 +2361,8 @@ def azimuthal_average_pyfai(
         return {
             "radial": radial_out,
             "profiles": profiles,
-            "centers_used": centers_used,
+            "centers_used_xy": centers_used_xy,
+            "centers_used_yx": np.column_stack((centers_used_xy[:, 1], centers_used_xy[:, 0])),
             "success": success,
             "geometry": geometry,
             "unit": unit,
@@ -2086,25 +2377,80 @@ def azimuthal_average_pyfai(
     return radial_out, profiles
 
 
+def get_polar_map(ai, image, mask=None, pol=None, npt_rad=500, npt_azim=360,
+                  q_unit="q_A^-1", correct_solid_angle=True, method=("bbox", "csr", "cython")):
+    """
+    Compute I(q, chi) using pyFAI integrate2d.
+
+    Returns
+    -------
+    I_qchi : ndarray, shape (n_chi, n_q) or (n_q, n_chi)
+        2D integrated intensity
+    q : ndarray
+        Radial coordinate
+    chi : ndarray
+        Azimuthal coordinate
+    """
+    res = ai.integrate2d(
+        image,
+        npt_rad=npt_rad,
+        npt_azim=npt_azim,
+        mask=mask,
+        polarization_factor=pol,
+        correctSolidAngle=correct_solid_angle,
+        unit=q_unit,
+        method=method,
+    )
+
+    # pyFAI versions can differ in return style; handle both common cases
+    if hasattr(res, "intensity"):
+        I_qchi = res.intensity
+        q = res.radial
+        chi = res.azimuthal
+    else:
+        I_qchi, q, chi = res
+
+    I_qchi = np.asarray(I_qchi)
+    q = np.asarray(q)
+    chi = np.asarray(chi)
+
+    # Ensure shape is (n_chi, n_q)
+    if I_qchi.shape == (len(q), len(chi)):
+        I_qchi = I_qchi.T
+
+    return I_qchi, q, chi
+
+
+def azimuthal_anisotropy(I_qchi):
+    """
+    Compute azimuthal std and relative std at each q.
+    Expects I_qchi shape = (n_chi, n_q)
+    """
+    mean_q = np.nanmean(I_qchi, axis=0)
+    std_q = np.nanstd(I_qchi, axis=0)
+    rel_std_q = std_q / mean_q
+    return mean_q, std_q, rel_std_q
+
+
 def compute_background_azimuthal_average(
     background_input,
-    centers=None,
-    center_guess=(CENTER_Y, CENTER_X),
+    centers_xy=None,
+    center_guess_yx=(CENTER_Y, CENTER_X),
     compute_center_if_missing=True,
     center_from="mean",
     search_radius=20,
     center_mask=None,
     r_min=0,
-    r_max=None,
-    downsample=1,
+    r_max=1400,
+    downsample=DOWNSAMPLE,
     intensity_threshold=None,
     top_percentile=60,
     npt=5000,
     radial_range=None,
-    nan_radial_range=None,
+    nan_radial_range=(NAN_MIN, NAN_MAX),
     azimuth_range=None,
     integration_mask=None,
-    unit="q_A^-1",
+    unit=UNIT,
     method=("bbox", "csr", "cython"),
     polarization_factor=POLARIZATION_FACTOR,
     dark=DARK,
@@ -2131,16 +2477,16 @@ def compute_background_azimuthal_average(
         - dict containing:
             - "background_stack": 3D array
             - or "background_mean": 2D array
-    centers : array-like or None, optional
+    centers_xy : array-like or None, optional
         Beam center(s) in (x, y) pixel coordinates.
         Accepts:
         - (2,) → single center applied to all images
         - (n_images, 2) → per-image centers
         If None, centers will be computed if `compute_center_if_missing=True`.
-    center_guess : tuple, optional
+    center_guess_yx : tuple, optional
         Initial guess for center finding as (y, x).
     compute_center_if_missing : bool, optional
-        If True and `centers` is None, automatically determine centers.
+        If True and `centers_xy` is None, automatically determine centers.
     center_from : {"mean", "each"}, optional
         Strategy for automatic center determination:
         - "mean": compute center from mean background image and apply to all images
@@ -2264,18 +2610,22 @@ def compute_background_azimuthal_average(
 
     center_result = None
 
-    if centers is not None:
-        centers_array = _normalize_centers_xy(centers, n_bg, use_average_center=False)
+    if centers_xy is not None:
+        centers_xy_array = _normalize_centers_xy(
+            centers_xy,
+            n_bg,
+            use_average_center=False,
+        )
     else:
         if not compute_center_if_missing:
-            raise ValueError("centers is None and compute_center_if_missing=False.")
+            raise ValueError("centers_xy is None and compute_center_if_missing=False.")
 
         if center_from == "mean":
             mean_bg = np.nanmean(background_images, axis=0)
 
             center_result = find_diffraction_center_from_guess_radial_fast(
                 image=mean_bg,
-                center_guess=center_guess,
+                center_guess_yx=center_guess_yx,
                 search_radius=search_radius,
                 mask=center_mask,
                 r_min=r_min,
@@ -2286,15 +2636,13 @@ def compute_background_azimuthal_average(
                 plot=False,
             )
 
-            centers_array = np.tile(
-                np.array([center_result["center_x"], center_result["center_y"]], dtype=float),
-                (n_bg, 1),
-            )
+            one_center_xy = np.asarray(center_result["center_xy"], dtype=float)
+            centers_xy_array = np.tile(one_center_xy, (n_bg, 1))
 
         elif center_from == "each":
             center_result = find_centers_in_stack_radial_parallel(
                 data_array=background_images,
-                center_guess=center_guess,
+                center_guess_yx=center_guess_yx,
                 center_mask=center_mask,
                 search_radius=search_radius,
                 r_min=r_min,
@@ -2305,14 +2653,14 @@ def compute_background_azimuthal_average(
                 progress_interval=10,
                 max_workers=MAX_PROCESSORS,
             )
-            centers_array = center_result["centers_xy"]
+            centers_xy_array = np.asarray(center_result["centers_xy"], dtype=float)
 
         else:
             raise ValueError("center_from must be 'mean' or 'each'")
 
     pyfai_result = azimuthal_average_pyfai(
         images=background_images,
-        centers=centers_array,
+        centers_xy=centers_xy_array,
         npt=npt,
         radial_range=radial_range,
         nan_radial_range=nan_radial_range,
@@ -2335,6 +2683,8 @@ def compute_background_azimuthal_average(
         fig, axes = plt.subplots(1, 2, figsize=figsize)
 
         im = axes[0].imshow(background_images[image_index], cmap="jet")
+        cx, cy = centers_xy_array[image_index]
+        axes[0].plot(cx, cy, "wo", ms=8, mec="k")
         axes[0].set_title("Background Image")
         axes[0].set_xlabel("Pixel")
         axes[0].set_ylabel("Pixel")
@@ -2366,7 +2716,8 @@ def compute_background_azimuthal_average(
             "background_profile_mean": background_profile_mean,
             "background_profile_std": background_profile_std,
             "background_images_used": background_images,
-            "centers_used": centers_array,
+            "centers_used_xy": centers_xy_array,
+            "centers_used_yx": np.column_stack((centers_xy_array[:, 1], centers_xy_array[:, 0])),
             "center_result": center_result,
             "pyfai_result": pyfai_result,
             "input_was_2d": input_was_2d,
@@ -2770,7 +3121,7 @@ def plot_normalization_window(
 def normalize_profiles_to_range(
     radial,
     profiles,
-    norm_range,
+    norm_range = (NORM_MIN, NORM_MAX),
     mode="mean",
     return_dict=True,
     plot=False,
@@ -2969,8 +3320,8 @@ def _als_baseline_1d(y, lam, p, niter):
 
 def subtract_als_baseline(
     data_array,
-    lam=1e6,
-    p=0.01,
+    lam=LAM_VAL,
+    p=P_VAL,
     niter=10,
     plot=False,
     profile_index=0,
@@ -3543,7 +3894,7 @@ def lineouts_by_delay_from_per_image_profiles(
     return unique_delays, mean_lineouts, std_lineouts, sem_lineouts
 
 
-def compute_difference_pdf(
+def compute_qualitative_difference_pdf(
     q,
     delta_iq,
     r_max=20.0,
@@ -3831,6 +4182,7 @@ def load_form_factor_table(file_path=FORM_FACTOR_FILE):
             form_factors[element] = coeffs
 
     return form_factors
+
 
 def load_form_factor(element):
     """ 
@@ -4558,3 +4910,70 @@ def compute_delta_gr_from_delta_fq(
         }
 
     return r, delta_gr
+
+
+def save_azimuthal_profiles_to_dat(
+    radial,
+    profiles,
+    file_names,
+    output_dir,
+    suffix="",
+    header="q\tintensity",
+    overwrite=False,
+):
+    """
+    Save azimuthally averaged profiles to .dat files using the corresponding
+    input file names.
+
+    Parameters
+    ----------
+    radial : np.ndarray
+        1D radial axis of shape (n_q,).
+    profiles : np.ndarray
+        2D array of shape (n_profiles, n_q).
+    file_names : sequence of str or Path
+        Original input file names corresponding to each profile.
+    output_dir : str or Path
+        Directory where .dat files will be written.
+    suffix : str, optional
+        Suffix appended before '.dat'. Example:
+        image001.tif -> image001_azav.dat if suffix="_azav"
+    header : str, optional
+        Header line written to each file.
+    overwrite : bool, optional
+        If False, raise an error if an output file already exists.
+
+    Returns
+    -------
+    saved_files : list of Path
+        Paths of written .dat files.
+    """
+    radial = np.asarray(radial, dtype=float)
+    profiles = np.asarray(profiles, dtype=float)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if radial.ndim != 1:
+        raise ValueError("radial must be 1D.")
+    if profiles.ndim != 2:
+        raise ValueError("profiles must be 2D.")
+    if profiles.shape[1] != len(radial):
+        raise ValueError("profiles.shape[1] must match len(radial).")
+    if len(file_names) != profiles.shape[0]:
+        raise ValueError("Number of file_names must match number of profiles.")
+
+    saved_files = []
+
+    for i, file_name in enumerate(file_names):
+        in_path = Path(file_name)
+        out_name = f"{in_path.stem}{suffix}.dat"
+        out_path = output_dir / out_name
+
+        if out_path.exists() and not overwrite:
+            raise FileExistsError(f"Output file already exists: {out_path}")
+
+        out_data = np.column_stack((radial, profiles[i]))
+        np.savetxt(out_path, out_data, header=header, comments="")
+        saved_files.append(out_path)
+
+    return saved_files
