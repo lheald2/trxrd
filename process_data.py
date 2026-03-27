@@ -45,8 +45,8 @@ def init_h5_file(h5_path, n_images, n_q, n_r):
         # Minimal processed outputs needed to build reference later
         # ------------------------------------------------------------
         proc.create_dataset("q", shape=(n_q,), dtype=np.float32)
-        proc.create_dataset("center_x", shape=(n_images,), dtype=np.float32)
-        proc.create_dataset("center_y", shape=(n_images,), dtype=np.float32)
+        # proc.create_dataset("center_x", shape=(n_images,), dtype=np.float32)
+        # proc.create_dataset("center_y", shape=(n_images,), dtype=np.float32)
         proc.create_dataset(
             "profiles_flat",
             shape=(n_images, n_q),
@@ -236,6 +236,14 @@ def process_and_save_chunks(
             # ------------------------------------------------------------
             # Mask
             # ------------------------------------------------------------
+            print(f"Applying beam stop mask for files {start_idx} to {stop_idx}")
+            chunk_dict["images"] = trxrd.apply_beamstop_mask(
+                data_array=chunk_dict["images"],
+                center_xy=(globals.MASK_CENTER_X, globals.MASK_CENTER_Y),
+                radius=globals.MASK_RADIUS,
+                plot=False,
+            )
+
             print(f"Applying mask for files {start_idx} to {stop_idx}")
             chunk_dict["images"] = trxrd.apply_nan_mask(
                 chunk_dict["images"],
@@ -260,35 +268,12 @@ def process_and_save_chunks(
             chunk_dict["images"] = xr_result["clean_data"]
 
             # ------------------------------------------------------------
-            # Find centers
-            # ------------------------------------------------------------
-            print(f"Finding centers for files {start_idx} to {stop_idx}")
-            center_result = trxrd.find_centers_in_stack_radial_parallel(
-                data_array=chunk_dict["images"],
-                center_guess=(globals.CENTER_Y, globals.CENTER_X),
-                search_radius=10,
-                center_mask=None,
-                r_min=0,
-                r_max=1600,
-                downsample=1,
-                intensity_threshold=None,
-                top_percentile=60,
-                max_workers=globals.MAX_PROCESSORS,
-                progress_interval=100,
-                plot_example=False,
-                example_index=0,
-                plot_center_vs_image=False,
-            )
-
-            centers = center_result["centers_xy"]
-
-            # ------------------------------------------------------------
             # Azimuthal integration
             # ------------------------------------------------------------
             print(f"Calculating azimuthal averages for files {start_idx} to {stop_idx}")
             az_result = trxrd.azimuthal_average_pyfai(
                 images=chunk_dict["images"],
-                centers=centers,
+                centers_xy=(globals.CENTER_X, globals.CENTER_Y),
                 npt=npt,
                 unit="q_A^-1",
                 nan_radial_range=nan_radial_range,
@@ -368,8 +353,8 @@ def process_and_save_chunks(
                 if not np.allclose(q_existing, q, rtol=1e-6, atol=1e-8, equal_nan=True):
                     raise ValueError("q axis changed between chunks. This should not happen.")
 
-            h5["processed/center_x"][start_idx:stop_idx] = centers[:, 0].astype(np.float32)
-            h5["processed/center_y"][start_idx:stop_idx] = centers[:, 1].astype(np.float32)
+            # h5["processed/center_x"][start_idx:stop_idx] = centers[:, 0].astype(np.float32)
+            # h5["processed/center_y"][start_idx:stop_idx] = centers[:, 1].astype(np.float32)
             h5["processed/profiles_flat"][start_idx:stop_idx, :] = profiles_flat.astype(np.float32)
 
 
