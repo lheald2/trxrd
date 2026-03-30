@@ -29,13 +29,13 @@ DELAY_SIGN = -1 # Check file naming scheme, sometimes positives delays have "-" 
 # ============================================================
 MASK_CENTER_X = 49
 MASK_CENTER_Y = 1667
-MASK_RADIUS = 20
+MASK_RADIUS = 30
 
 # ============================================================
 # Center Guess and Sampling Defaults
 # ============================================================
-CENTER_X = 43
-CENTER_Y = 1668
+CENTER_X = 44.5
+CENTER_Y = 1665.31
 DOWNSAMPLE = 2 # Downsample factor for center finding, e.g. 2 means use every other pixel, 4 means use every 4th pixel, etc.
 
 # ============================================================
@@ -44,8 +44,9 @@ DOWNSAMPLE = 2 # Downsample factor for center finding, e.g. 2 means use every ot
 UNIT = "q_A^-1" # Unit for x-axis of azimuthally averaged data, e.g. "q_A^-1" for inverse Angstroms, "2theta_deg" for degrees, etc. 
 NAN_MIN = 0.35 # Minimum value for valid data, values below this will be set to NaN, e.g. 0.35 or None for no minimum threshold
 NAN_MAX = None # Maximum value for valid data, values above this will be set to NaN, e.g. 1.0 or None for no maximum threshold
-NORM_MIN = 0.5 # Minimum value for normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
-NORM_MAX = 1.0 # Maximum value for normalization, values above this will be set to this value before normalization, e.g. 1.0 or None for no maximum threshold
+NORM_MIN = 4.0 # Minimum value for normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
+NORM_MAX = 4.2 # Maximum value for normalization, values above this will be set to this value before normalization, e.g. 1.0 or None for no maximum threshold
+N_POINTS = 3000 # Number of points for azimuthal averaging, e.g. 3000 or None to use all pixels
 
 # ============================================================
 # Detector Parameters and Defaults
@@ -62,7 +63,7 @@ TILT_PLANE_ROTATION = np.deg2rad(90)      # rad
 ROT3 = 0.0                      # rad, in-plane detector rotation
 
 # Optional corrections
-POLARIZATION_FACTOR = 0.99      # e.g. 0.99 or None
+POLARIZATION_FACTOR = 0.999      # e.g. 0.99 or None
 DARK = None                     # 2D dark image or None
 FLAT = None                     # 2D flat-field image or None
 
@@ -79,7 +80,7 @@ COMPOSITION = "BaTiO3" # Sample composition for form factor calculation, e.g. "B
 R_MAX = 20.0 # Maximum r value for PDF calculation, e.g. 20.0 or None for no maximum
 N_R = 2000 # Number of r points for PDF calculation, e.g.
 Q_MIN = 0.5 # Minimum q value for PDF calculation, e.g. 0.5 or None for no minimum
-Q_MAX = 16.0 # Maximum q value for PDF calculation, e.g. 16.0 or None for no maximum
+Q_MAX = 15.0 # Maximum q value for PDF calculation, e.g. 16.0 or None for no maximum
 WINDOW = "lorch" # Window function for PDF calculation, e.g. "lorch", "hanning", "blackman", or None for no window
 # ============================================================
 # Optional Saving .dat Files

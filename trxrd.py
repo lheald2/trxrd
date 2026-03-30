@@ -229,7 +229,7 @@ def get_image_details(
         plt.title("Log Scale")
 
         plt.subplot(1, 3, 3)
-        plt.hist(test.reshape(-1), bins=30, edgecolor="r", histtype="bar", alpha=0.5)
+        plt.hist(test.reshape(-1), bins=100, edgecolor="r", histtype="bar", alpha=0.5)
         plt.xlabel("Pixel Intensity")
         plt.ylabel("Pixel Number")
         plt.title("Histogram")
@@ -1971,6 +1971,40 @@ def make_azimuthal_integrator(
     return ai
 
 
+def custom_polarization_map_notebook(ai, image_shape, factor):
+    """
+    Reproduce the custom polarization correction from the earlier notebook
+    using modern pyFAI center_array calls.
+
+    Parameters
+    ----------
+    ai : pyFAI AzimuthalIntegrator
+        Configured integrator.
+    factor : float, optional
+        Polarization factor in the same -1 to +1 style used by the notebook.
+
+    Returns
+    -------
+    pol_map : np.ndarray
+        2D multiplicative correction map.
+    """
+    tth = ai.center_array(shape=image_shape, unit="2th_rad")
+    chi = ai.center_array(shape=image_shape, unit="chi_rad")
+
+    f = (factor + 1.0) / 2.0
+
+    denom = (
+        f * (1.0 - (np.sin(tth) * np.sin(chi))**2) +
+        (1.0 - f) * (1.0 - (np.sin(tth) * np.cos(chi))**2)
+    )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pol_map = 1.0 / denom
+
+    pol_map[~np.isfinite(pol_map)] = np.nan
+    return pol_map
+
+
 def build_pyfai_mask(image, mask=None):
     """
     Build a pyFAI-compatible mask for one image.
@@ -2033,6 +2067,9 @@ def _azimuthal_worker(
     tilt_plane_rotation,
     rot3,
     error_mode,
+    use_custom_polarization=False,
+    integration_function="integrate1d",
+    correct_solid_angle=False,
 ):
     """
     Worker function for azimuthal integration of a single image.
@@ -2050,14 +2087,10 @@ def _azimuthal_worker(
     unit : str
         Radial unit for integration.
     radial_range : tuple or None
-        Radial range passed directly to pyFAI.integrate1d.
-        This truncates the returned profile.
+        Radial range passed directly to pyFAI integration.
     nan_radial_range : tuple or None
         Range to keep in the returned profile. Values outside this range
-        are replaced with NaN after integration. This preserves array length.
-        Example:
-        - (0.3, None): set radial < 0.3 to NaN
-        - (0.3, 4.5): keep only 0.3 <= radial <= 4.5
+        are replaced with NaN after integration.
     azimuth_range : tuple or None
         Azimuthal range passed to pyFAI.
     mask : np.ndarray or None
@@ -2084,6 +2117,13 @@ def _azimuthal_worker(
         In-plane detector rotation in radians.
     error_mode : {"raise", "warn", "ignore"}
         Error handling mode.
+    use_custom_polarization : bool, optional
+        If True, apply notebook-style custom polarization as a 2D map
+        before integration, then disable pyFAI built-in polarization.
+    integration_function : {"integrate1d", "integrate1d_ng"}, optional
+        Which pyFAI 1D integrator to use.
+    correct_solid_angle : bool, optional
+        Whether to apply pyFAI solid-angle correction.
 
     Returns
     -------
@@ -2109,19 +2149,61 @@ def _azimuthal_worker(
 
         image_mask, clean_image = build_pyfai_mask(image, mask=mask)
 
-        radial, intensity = ai.integrate1d(
-            clean_image,
-            npt=npt,
-            unit=unit,
-            radial_range=radial_range,
-            azimuth_range=azimuth_range,
-            mask=image_mask,
-            dark=dark,
-            flat=flat,
-            polarization_factor=polarization_factor,
-            method=method,
-        )
+        # Choose image + polarization path
+        if use_custom_polarization and polarization_factor is not None:
+            pol_map = custom_polarization_map_notebook(
+                ai,
+                clean_image.shape,
+                factor=polarization_factor,
+            )
+            image_for_integration = clean_image * pol_map
+            pyfai_pol = None  # avoid double correction
+        else:
+            image_for_integration = clean_image
+            pyfai_pol = polarization_factor
 
+        # Choose pyFAI integration function
+        if integration_function == "integrate1d":
+            radial, intensity = ai.integrate1d(
+                image_for_integration,
+                npt=npt,
+                unit=unit,
+                radial_range=radial_range,
+                azimuth_range=azimuth_range,
+                mask=image_mask,
+                dark=dark,
+                flat=flat,
+                polarization_factor=pyfai_pol,
+                correctSolidAngle=correct_solid_angle,
+                method=method,
+            )
+        elif integration_function == "integrate1d_ng":
+            res = ai.integrate1d_ng(
+                image_for_integration,
+                npt=npt,
+                unit=unit,
+                radial_range=radial_range,
+                azimuth_range=azimuth_range,
+                mask=image_mask,
+                dark=dark,
+                flat=flat,
+                polarization_factor=pyfai_pol,
+                correctSolidAngle=correct_solid_angle,
+                method=method,
+            )
+
+            # Support both tuple-style and object-style pyFAI returns
+            if hasattr(res, "radial") and hasattr(res, "intensity"):
+                radial = res.radial
+                intensity = res.intensity
+            else:
+                radial, intensity = res
+        else:
+            raise ValueError(
+                "integration_function must be 'integrate1d' or 'integrate1d_ng'"
+            )
+
+        radial = np.asarray(radial, dtype=float)
         intensity = np.asarray(intensity, dtype=float)
 
         if nan_radial_range is not None:
@@ -2167,7 +2249,7 @@ def azimuthal_average_pyfai(
     images,
     centers_xy,
     use_average_center=False,
-    npt=5000,
+    npt=N_POINTS,
     unit=UNIT,
     radial_range=None,
     nan_radial_range=(NAN_MIN, NAN_MAX),
@@ -2188,6 +2270,9 @@ def azimuthal_average_pyfai(
     error_mode="raise",
     max_workers=None,
     progress_interval=100,
+    use_custom_polarization=False,
+    integration_function="integrate1d",
+    correct_solid_angle=False,
     **kwargs,
 ):
     """
@@ -2318,6 +2403,9 @@ def azimuthal_average_pyfai(
                 tilt_plane_rotation=tilt_plane_rotation,
                 rot3=rot3,
                 error_mode=error_mode,
+                use_custom_polarization=use_custom_polarization,
+                integration_function=integration_function,
+                correct_solid_angle=correct_solid_angle,
             )
             future_to_idx[future] = idx
 
@@ -2355,6 +2443,9 @@ def azimuthal_average_pyfai(
         "rot2": rot2_used,
         "rot3": rot3_used,
         "polarization_factor": polarization_factor,
+        "use_custom_polarization": use_custom_polarization,
+        "integration_function": integration_function,
+        "correct_solid_angle": correct_solid_angle,
     }
 
     if return_dict:
