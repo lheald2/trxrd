@@ -7,15 +7,11 @@ from pathlib import Path
 # Data and Mask Paths, Scan Name, and Filename Pattern
 # ============================================================
 DATA_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BTO400_S3") # Path to directory containing TIFF files
-MASK_FILE = Path(r"C:\Users\lheald\Box\TRXRDPython\testdata\mask_2021_dec.tif") # Path to mask file
+MASK_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\TRXRDPython\testdata\mask_2021_dec.tif") # Path to mask file
 SCAN_NAME = "BTO400nmS3_240Ksurv3" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
-_FILENAME_PATTERN = re.compile(
-    r"(?P<fluence>[-+]?\d*.?\d+)fs"
-    r"hw(?P<delay>[-+]?\d*.?\d+(?:e[-+]?\d+)?)"
-    r"delay(?P<image_number>\d+).tif$",
-    re.IGNORECASE,
-)
-SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Sargent_Beamtime_Data\processed_data") # Path to directory where processed data will be saved, e.g. as .h5 file
+BACKGROUND_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BlankSubstratePinkBeam\blankglasspinkM3_0.3-deg_theta2.735samz00001_012.tif")
+SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data") # Path to directory where processed data will be saved, e.g. as .h5 file
+
 # ============================================================
 # General Defaults
 # ============================================================

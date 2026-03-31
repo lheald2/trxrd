@@ -2546,6 +2546,12 @@ def compute_background_azimuthal_average(
     polarization_factor=POLARIZATION_FACTOR,
     dark=DARK,
     flat=FLAT,
+    use_custom_polarization=False,
+    integration_function="integrate1d",
+    correct_solid_angle=False,
+    error_mode="raise",
+    max_workers=None,
+    progress_interval=100,
     plot=False,
     image_index=0,
     figsize=FIGSIZE,
@@ -2599,31 +2605,37 @@ def compute_background_azimuthal_average(
     npt : int, optional
         Number of radial bins for azimuthal integration.
     radial_range : tuple or None, optional
-        Radial range passed directly to pyFAI.integrate1d.
-        This truncates the returned radial axis and profile.
+        Radial range passed directly to pyFAI integration.
     nan_radial_range : tuple or None, optional
         Radial range to keep after integration. Values outside this range are
-        replaced with NaN while preserving the returned profile length.
-        This is useful for masking out unreliable low-Q or high-Q regions
-        such as the beamstop region.
-
-        Examples:
-        - (0.3, None): set radial values below 0.3 to NaN
-        - (0.3, 4.5): keep only 0.3 <= radial <= 4.5, set the rest to NaN
+        replaced with NaN while preserving profile length.
     azimuth_range : tuple or None, optional
-        (min_angle, max_angle) azimuthal range in degrees.
+        Azimuthal integration range in degrees.
     integration_mask : np.ndarray or None, optional
         Boolean mask applied during azimuthal integration (True = excluded).
     unit : str, optional
         Radial unit for output (e.g., "q_A^-1", "2th_deg", "r_mm").
     method : tuple or str, optional
         Integration method passed to pyFAI.
-    polarization_factor : float, optional
+    polarization_factor : float or None, optional
         Polarization correction factor.
     dark : np.ndarray or None, optional
         Dark current image for correction.
     flat : np.ndarray or None, optional
         Flat-field correction image.
+    use_custom_polarization : bool, optional
+        If True, apply the notebook-style custom polarization correction
+        before integration and disable pyFAI's built-in polarization step.
+    integration_function : {"integrate1d", "integrate1d_ng"}, optional
+        Which pyFAI 1D integration function to use.
+    correct_solid_angle : bool, optional
+        Whether to apply pyFAI solid-angle correction during integration.
+    error_mode : {"raise", "warn", "ignore"}, optional
+        Error handling mode passed to azimuthal averaging.
+    max_workers : int or None, optional
+        Number of worker threads for azimuthal averaging.
+    progress_interval : int, optional
+        Print progress every `progress_interval` completed images.
     plot : bool, optional
         If True, display:
         - an example background image
@@ -2647,7 +2659,8 @@ def compute_background_azimuthal_average(
                 "background_profile_mean": np.ndarray of shape (npt,),
                 "background_profile_std": np.ndarray of shape (npt,),
                 "background_images_used": np.ndarray,
-                "centers_used": np.ndarray of shape (n_images, 2),
+                "centers_used_xy": np.ndarray of shape (n_images, 2),
+                "centers_used_yx": np.ndarray of shape (n_images, 2),
                 "center_result": dict or None,
                 "pyfai_result": dict,
                 "input_was_2d": bool,
@@ -2666,18 +2679,6 @@ def compute_background_azimuthal_average(
         - centers are missing and cannot be computed
         - center_from is invalid
         - image_index is out of bounds
-
-    Notes
-    -----
-    - Centers are internally handled in (x, y) format for pyFAI compatibility.
-    - If `center_from="mean"`, the center is computed once from the mean image
-      and applied to all images.
-    - If `center_from="each"`, center finding is parallelized across images.
-    - `radial_range` truncates the integration domain.
-    - `nan_radial_range` preserves profile length and replaces excluded radial
-      values with NaN after integration.
-    - The function preserves input dimensionality information via
-      `input_was_2d`.
     """
     if isinstance(background_input, dict):
         if "background_stack" in background_input:
@@ -2691,7 +2692,10 @@ def compute_background_azimuthal_average(
     else:
         background_images = np.asarray(background_input, dtype=float)
 
-    background_images, input_was_2d = _as_image_stack(background_images, name="background_input")
+    background_images, input_was_2d = _as_image_stack(
+        background_images,
+        name="background_input",
+    )
     n_bg = background_images.shape[0]
 
     if not (0 <= image_index < n_bg):
@@ -2762,7 +2766,13 @@ def compute_background_azimuthal_average(
         polarization_factor=polarization_factor,
         dark=dark,
         flat=flat,
+        use_custom_polarization=use_custom_polarization,
+        integration_function=integration_function,
+        correct_solid_angle=correct_solid_angle,
         return_dict=True,
+        error_mode=error_mode,
+        max_workers=max_workers,
+        progress_interval=progress_interval,
     )
 
     radial = pyfai_result["radial"]
