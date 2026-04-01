@@ -638,7 +638,7 @@ def xy_to_yx(center_xy):
 
 
 def load_background(
-    path,
+    background_path,
     sort=True,
     plot=False,
     figsize=FIGSIZE,
@@ -646,19 +646,19 @@ def load_background(
     """
     Load background TIFF image(s) from either a single file or a folder.
     """
-    path = Path(path)
+    background_path = Path(background_path)
 
-    if not path.exists():
-        raise ValueError(f"Background path does not exist: {path}")
+    if not background_path.exists():
+        raise ValueError(f"Background path does not exist: {background_path}")
 
     valid_suffixes = {".tif", ".tiff"}
 
-    if path.is_file():
-        if path.suffix.lower() not in valid_suffixes:
-            raise ValueError(f"Background file must be .tif or .tiff, got: {path.suffix}")
+    if background_path.is_file():
+        if background_path.suffix.lower() not in valid_suffixes:
+            raise ValueError(f"Background file must be .tif or .tiff, got: {background_path.suffix}")
 
-        files = [path]
-        background_stack = tf.imread(str(path)).astype(float)
+        files = [background_path]
+        background_stack = tf.imread(str(background_path)).astype(float)
 
         if background_stack.ndim != 2:
             raise ValueError(
@@ -667,9 +667,9 @@ def load_background(
 
         background_stack = background_stack[None, :, :]
 
-    elif path.is_dir():
+    elif background_path.is_dir():
         files = [
-            f for f in path.iterdir()
+            f for f in background_path.iterdir()
             if f.is_file() and f.suffix.lower() in valid_suffixes
         ]
 
@@ -677,7 +677,7 @@ def load_background(
             files = sorted(files)
 
         if len(files) == 0:
-            raise ValueError(f"No .tif or .tiff background files found in folder: {path}")
+            raise ValueError(f"No .tif or .tiff background files found in folder: {background_path}")
 
         background_stack = tf.imread([str(f) for f in files]).astype(float)
 
@@ -690,7 +690,7 @@ def load_background(
             )
 
     else:
-        raise ValueError(f"Path is neither a file nor a folder: {path}")
+        raise ValueError(f"Path is neither a file nor a folder: {background_path}")
 
     background_mean = np.nanmean(background_stack, axis=0)
     background_std = np.nanstd(background_stack, axis=0)
@@ -726,113 +726,8 @@ def load_background(
     }
 
 
-def subtract_background(
-    data_array,
-    background,
-    average_background=True,
-    plot=False,
-    image_index=0,
-    figsize=(12, 4),
-):
-    """
-    Subtract a background image from diffraction data.
 
-    Parameters
-    ----------
-    data_array : np.ndarray
-        2D image or 3D image stack.
-    background : np.ndarray
-        2D background image or 3D background stack.
-    average_background : bool, optional
-        If True and background is 3D, use its mean.
-        If False and background is 3D, background must match data shape image-by-image.
-    plot : bool, optional
-        If True, plot one example.
-    image_index : int, optional
-        Which image to plot.
-    figsize : tuple, optional
-        Figure size.
-
-    Returns
-    -------
-    dict
-        {
-            "corrected_data": same dimensionality as input data_array,
-            "background_used": 2D or 3D background actually subtracted,
-            "background_mean": 2D mean background image,
-        }
-    """
-    image_stack, input_was_2d = _as_image_stack(data_array, name="data_array")
-    bg_stack, bg_input_was_2d = _as_image_stack(background, name="background")
-
-    n_images = image_stack.shape[0]
-
-    if not (0 <= image_index < n_images):
-        raise ValueError(
-            f"image_index={image_index} is out of bounds for {n_images} image(s)"
-        )
-
-    background_mean = np.nanmean(bg_stack, axis=0)
-
-    if bg_input_was_2d:
-        background_used = background_mean
-        if image_stack.shape[1:] != background_used.shape:
-            raise ValueError(
-                f"Background shape {background_used.shape} does not match image shape {image_stack.shape[1:]}"
-            )
-        corrected_stack = image_stack - background_used[None, :, :]
-
-    else:
-        if average_background:
-            background_used = background_mean
-            if image_stack.shape[1:] != background_used.shape:
-                raise ValueError(
-                    f"Background shape {background_used.shape} does not match image shape {image_stack.shape[1:]}"
-                )
-            corrected_stack = image_stack - background_used[None, :, :]
-        else:
-            if bg_stack.shape != image_stack.shape:
-                raise ValueError(
-                    f"background stack shape {bg_stack.shape} does not match data stack shape {image_stack.shape}"
-                )
-            background_used = bg_stack
-            corrected_stack = image_stack - background_used
-
-    if background_used.ndim == 2:
-        background_image = background_used
-    else:
-        background_image = background_used[image_index]
-
-    if plot:
-        fig, axes = plt.subplots(1, 3, figsize=figsize)
-
-        im0 = axes[0].imshow(image_stack[image_index], cmap="jet")
-        axes[0].set_title("Original Image")
-        plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-
-        im1 = axes[1].imshow(background_image, cmap="jet")
-        axes[1].set_title("Background Image")
-        plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-        im2 = axes[2].imshow(corrected_stack[image_index], cmap="jet")
-        axes[2].set_title("Background-Subtracted Image")
-        plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-
-        plt.tight_layout()
-        plt.show()
-
-    return {
-        "corrected_data": _restore_image_dimensionality(corrected_stack, input_was_2d),
-        "background_used": background_used,
-        "background_mean": background_mean,
-    }
-
-
-def make_circular_mask(
-        image_shape, 
-        center_xy=(MASK_CENTER_X, MASK_CENTER_Y), 
-        radius=MASK_RADIUS
-):
+def make_circular_mask(image_shape, center_xy, radius):
     """
     Create a circular boolean mask.
 
@@ -856,137 +751,82 @@ def make_circular_mask(
 
     r = np.sqrt((x - x0)**2 + (y - y0)**2)
     mask_bool = r <= radius
-
     return mask_bool
 
 
-def apply_beamstop_mask(
-    data_array,
-    center_xy=(MASK_CENTER_X, MASK_CENTER_Y),
-    radius=MASK_RADIUS,
-    plot=False,
-    image_index=0,
-    figsize=FIGSIZE,
-    use_shared_color_scale=True,
-):
+def load_detector_mask(mask_path):
     """
-    Apply a circular beam stop mask to image data, replacing masked pixels with NaN.
-
-    This function accepts either a single 2D image or a 3D image stack.
-    Internally, the input is converted to a stack using `_as_image_stack`,
-    the circular mask is broadcast across all images, and the original
-    dimensionality is restored before returning.
+    Load a detector mask from file.
 
     Parameters
     ----------
-    data_array : np.ndarray
-        Input image data, either:
-        - 2D: (rows, cols)
-        - 3D: (n_images, rows, cols)
-    center_xy : tuple
-        Beam center as (x0, y0) in pixel coordinates.
-    radius : float
-        Beam stop mask radius in pixels.
-    plot : bool, optional
-        If True, plot an example original image and masked image, with the
-        beam stop mask overlaid on the original.
-    image_index : int, optional
-        Which image to plot if the input is a stack.
-        If the input is a single 2D image, image_index must be 0.
-    figsize : tuple, optional
-        Figure size for the example plot.
-    use_shared_color_scale : bool, optional
-        If True, use the same color scale for the original and masked images.
+    mask_path : str or Path
+        Path to mask image. Assumes pixels with value 0 are masked.
 
     Returns
     -------
-    masked_data : np.ndarray
-        Float copy of input data with beam stop region set to NaN.
-        Returns:
-        - 2D array if input was 2D
-        - 3D array if input was 3D
-
-    Raises
-    ------
-    ValueError
-        If the input dimensions are invalid, or if image_index is out of bounds.
+    mask_bool : np.ndarray
+        2D boolean mask where True indicates masked pixels.
     """
-    image_stack, input_was_2d = _as_image_stack(data_array, name="data_array")
-    n_images = image_stack.shape[0]
-    image_shape = image_stack.shape[1:]
+    mask = tf.imread(Path(mask_path))
+    mask_bool = np.asarray(mask == 0, dtype=bool)
+    return mask_bool
 
-    if not (0 <= image_index < n_images):
-        raise ValueError(
-            f"image_index={image_index} is out of bounds for {n_images} image(s)."
-        )
 
-    mask_bool = make_circular_mask(
+def build_combined_mask(
+    image_shape,
+    center_xy,
+    radius,
+    detector_mask=None,
+    mask_path=None,
+):
+    """
+    Build a combined boolean mask from:
+    - circular beam stop mask
+    - detector mask
+
+    Parameters
+    ----------
+    image_shape : tuple
+        Shape of image as (rows, cols).
+    center_xy : tuple
+        Beam stop center as (x0, y0).
+    radius : float
+        Beam stop radius in pixels.
+    detector_mask : np.ndarray, optional
+        Preloaded 2D boolean detector mask where True = masked.
+    mask_path : str or Path, optional
+        Path to detector mask file. Used only if detector_mask is None.
+
+    Returns
+    -------
+    combined_mask : np.ndarray
+        2D boolean mask where True indicates masked pixels.
+    """
+    beamstop_mask = make_circular_mask(
         image_shape=image_shape,
         center_xy=center_xy,
         radius=radius,
     )
 
-    masked_stack = image_stack.astype(float, copy=True)
-    masked_stack = np.where(mask_bool[None, :, :], np.nan, masked_stack)
+    if detector_mask is None and mask_path is not None:
+        detector_mask = load_detector_mask(mask_path)
 
-    if plot:
-        original_image = image_stack[image_index]
-        masked_image = masked_stack[image_index]
+    if detector_mask is None:
+        return beamstop_mask
 
-        # Use log scale
-        log_original = np.log1p(original_image)
-        log_masked = np.log1p(masked_image)
-
-        if use_shared_color_scale:
-            finite_vals = log_original[np.isfinite(log_original)]
-            vmin = np.nanmin(finite_vals)
-            vmax = np.nanmax(finite_vals)
-        else:
-            vmin = None
-            vmax = None
-
-        fig, axes = plt.subplots(1, 2, figsize=figsize)
-
-        # Original (log scale) + mask overlay
-        im0 = axes[0].imshow(log_original, cmap="viridis", vmin=vmin, vmax=vmax)
-        axes[0].contour(mask_bool, levels=[0.5], colors="white", linewidths=1.5)
-        axes[0].scatter(
-            [center_xy[0]], [center_xy[1]],
-            color="white", s=20, marker="x"
+    if detector_mask.shape != image_shape:
+        raise ValueError(
+            f"Detector mask shape {detector_mask.shape} does not match image shape {image_shape}."
         )
-        axes[0].set_title("Log Image with Beam Stop Mask")
-        axes[0].set_xlabel("Pixel")
-        axes[0].set_ylabel("Pixel")
-        plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
-        # Masked (log scale)
-        im1 = axes[1].imshow(log_masked, cmap="viridis", vmin=vmin, vmax=vmax)
-        axes[1].set_title("Log Masked Image")
-        axes[1].set_xlabel("Pixel")
-        axes[1].set_ylabel("Pixel")
-        plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-        plt.tight_layout()
-        plt.show()
-
-    return _restore_image_dimensionality(masked_stack, input_was_2d)
+    combined_mask = beamstop_mask | detector_mask
+    return combined_mask
 
 
-def apply_nan_mask(
-    data_array,
-    mask_path = MASK_FILE,
-    plot=False,
-    image_index=0,
-    figsize=FIGSIZE,
-    use_shared_color_scale=True,
-):
+def apply_mask_from_bool(data_array, mask_bool):
     """
-    Apply a binary mask to image data, replacing masked pixels with NaN.
-
-    This function accepts either a single 2D image or a 3D image stack.
-    Internally, the input is converted to a stack using `_as_image_stack`,
-    the mask is broadcast across all images, and the original dimensionality
-    is restored before returning.
+    Apply a precomputed 2D boolean mask to image data, replacing masked pixels with NaN.
 
     Parameters
     ----------
@@ -994,84 +834,23 @@ def apply_nan_mask(
         Input image data, either:
         - 2D: (rows, cols)
         - 3D: (n_images, rows, cols)
-    mask_path : str or Path
-        Path to a mask file containing 0s and 1s.
-        Pixels where mask == 0 are replaced with NaN.
-    plot : bool, optional
-        If True, plot an example original image and masked image.
-    image_index : int, optional
-        Which image to plot if the input is a stack.
-        If the input is a single 2D image, image_index must be 0.
-    figsize : tuple, optional
-        Figure size for the example plot.
+    mask_bool : np.ndarray
+        2D boolean mask where True indicates masked pixels.
 
     Returns
     -------
     masked_data : np.ndarray
         Float copy of input data with masked pixels set to NaN.
-        Returns:
-        - 2D array if input was 2D
-        - 3D array if input was 3D
-
-    Raises
-    ------
-    ValueError
-        If the input dimensions are invalid, if the mask shape does not match
-        the image shape, or if image_index is out of bounds.
     """
     image_stack, input_was_2d = _as_image_stack(data_array, name="data_array")
-
-    mask = tf.imread(Path(mask_path))
-    mask_bool = np.asarray(mask == 0, dtype=bool)
 
     if image_stack.shape[1:] != mask_bool.shape:
         raise ValueError(
             f"Mask shape {mask_bool.shape} does not match image shape {image_stack.shape[1:]}."
         )
 
-    n_images = image_stack.shape[0]
-    if not (0 <= image_index < n_images):
-        raise ValueError(
-            f"image_index={image_index} is out of bounds for {n_images} image(s)."
-        )
-
     masked_stack = image_stack.astype(float, copy=True)
-
-    # Broadcast the 2D mask across the full image stack without altering
-    # unmasked pixel values.
-    masked_stack = np.where(mask_bool[None, :, :], np.nan, masked_stack)
-
-    if plot:
-        original_image = image_stack[image_index]
-        masked_image = masked_stack[image_index]
-
-        log_original = np.log1p(original_image)
-        log_masked = np.log1p(masked_image)
-
-        if use_shared_color_scale:
-            finite_vals = log_original[np.isfinite(log_original)]
-            vmin = np.nanmin(finite_vals)
-            vmax = np.nanmax(finite_vals)
-        else:
-            vmin = None
-            vmax = None
-
-        fig, axes = plt.subplots(1, 2, figsize=figsize)
-
-        im0 = axes[0].imshow(log_original, cmap="viridis", vmin=vmin, vmax=vmax)
-        axes[0].set_title("Log Original Image")
-        axes[0].set_xlabel("Pixel")
-        axes[0].set_ylabel("Pixel")
-        plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-
-        im1 = axes[1].imshow(log_masked, cmap="viridis", vmin=vmin, vmax=vmax)
-        axes[1].set_title("Log Masked Image")
-        axes[1].set_xlabel("Pixel")
-        axes[1].set_ylabel("Pixel")
-        plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-        plt.tight_layout()
-        plt.show()
+    masked_stack[:, mask_bool] = np.nan
 
     return _restore_image_dimensionality(masked_stack, input_was_2d)
 
@@ -1081,6 +860,7 @@ def _remove_xrays(
     mean_image,
     std_image,
     std_factor=STD_FACTOR,
+    mask_bool=None,
 ):
     """
     Replace hot pixels in a single image with NaN using a threshold based on
@@ -1095,24 +875,13 @@ def _remove_xrays(
     std_image : np.ndarray
         2D standard deviation image computed from the full stack.
     std_factor : float, optional
-        Threshold multiplier. Pixels satisfying
-
-            image >= mean_image + std_factor * std_image
-
-        are replaced with NaN.
+        Threshold multiplier.
+    mask_bool : np.ndarray, optional
+        2D boolean mask where True indicates permanently masked pixels.
 
     Returns
     -------
     result : dict
-        Dictionary containing:
-        - "clean_image" : np.ndarray
-            2D cleaned image with hot pixels replaced by NaN.
-        - "bad_mask" : np.ndarray
-            Boolean mask of removed pixels.
-        - "n_removed" : int
-            Number of removed pixels.
-        - "pct_removed" : float
-            Percent of removed pixels in the image.
     """
     image = np.asarray(image, dtype=float)
     mean_image = np.asarray(mean_image, dtype=float)
@@ -1125,14 +894,28 @@ def _remove_xrays(
     if std_image.shape != image.shape:
         raise ValueError("std_image must have the same shape as image.")
 
+    if mask_bool is not None:
+        mask_bool = np.asarray(mask_bool, dtype=bool)
+        if mask_bool.shape != image.shape:
+            raise ValueError("mask_bool must have the same shape as image.")
+
     upper_threshold = mean_image + std_factor * std_image
+
+    # Only search for hot pixels in valid, unmasked pixels
     bad_mask = image >= upper_threshold
+    if mask_bool is not None:
+        bad_mask = bad_mask & (~mask_bool)
 
     clean_image = image.copy()
     clean_image[bad_mask] = np.nan
 
+    # Keep permanently masked pixels as NaN too
+    if mask_bool is not None:
+        clean_image[mask_bool] = np.nan
+
     n_removed = int(np.sum(bad_mask))
-    pct_removed = 100.0 * n_removed / image.size
+    valid_pixels = image.size if mask_bool is None else int(np.sum(~mask_bool))
+    pct_removed = 100.0 * n_removed / valid_pixels if valid_pixels > 0 else np.nan
 
     return {
         "clean_image": clean_image,
@@ -1148,51 +931,18 @@ def remove_xrays(
     plot=False,
     image_index=0,
     return_dict=True,
+    mask_bool=None,
 ):
     """
     Remove hot pixels from one image or a stack of images using a threshold
     based on the stack mean and standard deviation.
 
-    This function converts the input to a 3D image stack internally, computes
-    the stack mean and standard deviation, removes hot pixels from each image,
-    and then restores the original dimensionality before returning.
-
     Parameters
     ----------
-    data_array : np.ndarray
-        Input image data, either:
-        - 2D: (rows, cols)
-        - 3D: (n_images, rows, cols)
-    std_factor : float, optional
-        Threshold multiplier used to identify hot pixels.
-    plot : bool, optional
-        If True, plot:
-        - percent of removed pixels vs image index
-        - one example original image
-        - one example cleaned image
-    image_index : int, optional
-        Image index used for plotting when the input is a stack.
-    return_dict : bool, optional
-        If True, return a dictionary.
-        If False, return only the cleaned data array.
-
-    Returns
-    -------
-    result : dict or np.ndarray
-        If return_dict=True:
-            {
-                "clean_data": np.ndarray,
-                "pct_removed": np.ndarray of shape (n_images,),
-                "n_removed": np.ndarray of shape (n_images,),
-                "mean_image": np.ndarray of shape (rows, cols),
-                "std_image": np.ndarray of shape (rows, cols),
-                "input_was_2d": bool,
-            }
-
-        If return_dict=False:
-            clean_data
-
-        `clean_data` has the same dimensionality as the input.
+    ...
+    mask_bool : np.ndarray, optional
+        2D boolean mask where True indicates permanently masked pixels.
+        These pixels are excluded from the stack statistics and kept as NaN.
     """
     image_stack, input_was_2d = _as_image_stack(data_array, name="data_array")
     n_images = image_stack.shape[0]
@@ -1202,8 +952,18 @@ def remove_xrays(
             f"image_index={image_index} is out of bounds for {n_images} image(s)."
         )
 
-    mean_image = np.nanmean(image_stack, axis=0)
-    std_image = np.nanstd(image_stack, axis=0)
+    working_stack = image_stack.astype(float, copy=True)
+
+    if mask_bool is not None:
+        mask_bool = np.asarray(mask_bool, dtype=bool)
+        if working_stack.shape[1:] != mask_bool.shape:
+            raise ValueError(
+                f"Mask shape {mask_bool.shape} does not match image shape {working_stack.shape[1:]}."
+            )
+        working_stack[:, mask_bool] = np.nan
+
+    mean_image = np.nanmean(working_stack, axis=0)
+    std_image = np.nanstd(working_stack, axis=0)
 
     print(f"Removing hot pixels from {n_images} image(s)...")
 
@@ -1211,12 +971,13 @@ def remove_xrays(
     n_removed_list = []
     pct_removed_list = []
 
-    for image in image_stack:
+    for image in working_stack:
         result = _remove_xrays(
             image=image,
             mean_image=mean_image,
             std_image=std_image,
             std_factor=std_factor,
+            mask_bool=mask_bool,
         )
         clean_list.append(result["clean_image"])
         n_removed_list.append(result["n_removed"])
@@ -1236,8 +997,8 @@ def remove_xrays(
         axes[0].set_xlabel("Image Number")
         axes[0].set_ylabel("Percent")
 
-        im1 = axes[1].imshow(image_stack[image_index], cmap="jet")
-        axes[1].set_title("Original Image")
+        im1 = axes[1].imshow(working_stack[image_index], cmap="jet")
+        axes[1].set_title("Original / Masked Image")
         plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
         im2 = axes[2].imshow(clean_stack[image_index], cmap="jet")
@@ -1268,6 +1029,7 @@ def remove_xrays_pool(
     return_dict=True,
     max_workers=MAX_PROCESSORS,
     progress_interval=100,
+    mask_bool=None,
 ):
     """
     Remove hot pixels from one image or a stack of images in parallel using a
@@ -1329,8 +1091,18 @@ def remove_xrays_pool(
     if progress_interval is None or progress_interval <= 0:
         progress_interval = max(1, n_images // 20)
 
-    mean_image = np.nanmean(image_stack, axis=0)
-    std_image = np.nanstd(image_stack, axis=0)
+    working_stack = image_stack.astype(float, copy=True)
+
+    if mask_bool is not None:
+        mask_bool = np.asarray(mask_bool, dtype=bool)
+        if working_stack.shape[1:] != mask_bool.shape:
+            raise ValueError(
+                f"Mask shape {mask_bool.shape} does not match image shape {working_stack.shape[1:]}."
+            )
+        working_stack[:, mask_bool] = np.nan
+
+    mean_image = np.nanmean(working_stack, axis=0)
+    std_image = np.nanstd(working_stack, axis=0)
 
     print(f"Removing hot pixels from {n_images} image(s)...")
 
@@ -1341,13 +1113,14 @@ def remove_xrays_pool(
         mean_image=mean_image,
         std_image=std_image,
         std_factor=std_factor,
+        mask_bool=mask_bool,
     )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {}
 
         for idx in range(n_images):
-            future = executor.submit(worker, image_stack[idx])
+            future = executor.submit(worker, working_stack[idx])
             future_to_idx[future] = idx
 
         completed = 0
@@ -1378,8 +1151,8 @@ def remove_xrays_pool(
         axes[0].set_xlabel("Image Number")
         axes[0].set_ylabel("Percent")
 
-        im1 = axes[1].imshow(image_stack[image_index], cmap="jet")
-        axes[1].set_title("Original Image")
+        im1 = axes[1].imshow(working_stack[image_index], cmap="jet")
+        axes[1].set_title("Original / Masked Image")
         plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
         im2 = axes[2].imshow(clean_stack[image_index], cmap="jet")
@@ -5078,3 +4851,214 @@ def save_azimuthal_profiles_to_dat(
         saved_files.append(out_path)
 
     return saved_files
+
+
+
+#-------------------------------------------------------------
+# Old Functions
+#-------------------------------------------------------------
+
+def apply_nan_mask(
+    data_array,
+    mask_path=MASK_FILE,
+    plot=False,
+    image_index=0,
+    figsize=FIGSIZE,
+    use_shared_color_scale=True,
+):
+    """
+    Apply a binary mask to image data, replacing masked pixels with NaN.
+
+    This function accepts either a single 2D image or a 3D image stack.
+    Internally, the input is converted to a stack using `_as_image_stack`,
+    the mask is broadcast across all images, and the original dimensionality
+    is restored before returning.
+
+    Parameters
+    ----------
+    data_array : np.ndarray
+        Input image data, either:
+        - 2D: (rows, cols)
+        - 3D: (n_images, rows, cols)
+    mask_path : str or Path
+        Path to a mask file containing 0s and 1s.
+        Pixels where mask == 0 are replaced with NaN.
+    plot : bool, optional
+        If True, plot an example original image and masked image.
+    image_index : int, optional
+        Which image to plot if the input is a stack.
+        If the input is a single 2D image, image_index must be 0.
+    figsize : tuple, optional
+        Figure size for the example plot.
+
+    Returns
+    -------
+    masked_data : np.ndarray
+        Float copy of input data with masked pixels set to NaN.
+        Returns:
+        - 2D array if input was 2D
+        - 3D array if input was 3D
+
+    Raises
+    ------
+    ValueError
+        If the input dimensions are invalid, if the mask shape does not match
+        the image shape, or if image_index is out of bounds.
+    """
+    image_stack, input_was_2d = _as_image_stack(data_array, name="data_array")
+    n_images = image_stack.shape[0]
+
+    if not (0 <= image_index < n_images):
+        raise ValueError(
+            f"image_index={image_index} is out of bounds for {n_images} image(s)."
+        )
+
+    mask_bool = load_detector_mask(mask_path)
+
+    if image_stack.shape[1:] != mask_bool.shape:
+        raise ValueError(
+            f"Mask shape {mask_bool.shape} does not match image shape {image_stack.shape[1:]}."
+        )
+
+    masked_stack = apply_mask_from_bool(image_stack, mask_bool)
+
+    if plot:
+        original_image = image_stack[image_index]
+        masked_image = masked_stack[image_index]
+
+        log_original = np.log1p(original_image)
+        log_masked = np.log1p(masked_image)
+
+        if use_shared_color_scale:
+            finite_vals = log_original[np.isfinite(log_original)]
+            vmin = np.nanmin(finite_vals)
+            vmax = np.nanmax(finite_vals)
+        else:
+            vmin = None
+            vmax = None
+
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+        im0 = axes[0].imshow(log_original, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[0].set_title("Log Original Image")
+        axes[0].set_xlabel("Pixel")
+        axes[0].set_ylabel("Pixel")
+        plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+        im1 = axes[1].imshow(log_masked, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[1].set_title("Log Masked Image")
+        axes[1].set_xlabel("Pixel")
+        axes[1].set_ylabel("Pixel")
+        plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        plt.show()
+
+    return _restore_image_dimensionality(masked_stack, input_was_2d)
+
+
+def apply_beamstop_mask(
+    data_array,
+    center_xy=(MASK_CENTER_X, MASK_CENTER_Y),
+    radius=MASK_RADIUS,
+    plot=False,
+    image_index=0,
+    figsize=FIGSIZE,
+    use_shared_color_scale=True,
+):
+    """
+    Apply a circular beam stop mask to image data, replacing masked pixels with NaN.
+
+    This function accepts either a single 2D image or a 3D image stack.
+    Internally, the input is converted to a stack using `_as_image_stack`,
+    the circular mask is broadcast across all images, and the original
+    dimensionality is restored before returning.
+
+    Parameters
+    ----------
+    data_array : np.ndarray
+        Input image data, either:
+        - 2D: (rows, cols)
+        - 3D: (n_images, rows, cols)
+    center_xy : tuple
+        Beam center as (x0, y0) in pixel coordinates.
+    radius : float
+        Beam stop mask radius in pixels.
+    plot : bool, optional
+        If True, plot an example original image and masked image, with the
+        beam stop mask overlaid on the original.
+    image_index : int, optional
+        Which image to plot if the input is a stack.
+        If the input is a single 2D image, image_index must be 0.
+    figsize : tuple, optional
+        Figure size for the example plot.
+    use_shared_color_scale : bool, optional
+        If True, use the same color scale for the original and masked images.
+
+    Returns
+    -------
+    masked_data : np.ndarray
+        Float copy of input data with beam stop region set to NaN.
+        Returns:
+        - 2D array if input was 2D
+        - 3D array if input was 3D
+
+    Raises
+    ------
+    ValueError
+        If the input dimensions are invalid, or if image_index is out of bounds.
+    """
+    image_stack, input_was_2d = _as_image_stack(data_array, name="data_array")
+    n_images = image_stack.shape[0]
+    image_shape = image_stack.shape[1:]
+
+    if not (0 <= image_index < n_images):
+        raise ValueError(
+            f"image_index={image_index} is out of bounds for {n_images} image(s)."
+        )
+
+    mask_bool = make_circular_mask(
+        image_shape=image_shape,
+        center_xy=center_xy,
+        radius=radius,
+    )
+
+    masked_stack = apply_mask_from_bool(image_stack, mask_bool)
+
+    if plot:
+        original_image = image_stack[image_index]
+        masked_image = masked_stack[image_index]
+
+        log_original = np.log1p(original_image)
+        log_masked = np.log1p(masked_image)
+
+        if use_shared_color_scale:
+            finite_vals = log_original[np.isfinite(log_original)]
+            vmin = np.nanmin(finite_vals)
+            vmax = np.nanmax(finite_vals)
+        else:
+            vmin = None
+            vmax = None
+
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+        im0 = axes[0].imshow(log_original, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[0].contour(mask_bool, levels=[0.5], colors="white", linewidths=1.5)
+        axes[0].scatter([center_xy[0]], [center_xy[1]], color="white", s=20, marker="x")
+        axes[0].set_title("Log Image with Beam Stop Mask")
+        axes[0].set_xlabel("Pixel")
+        axes[0].set_ylabel("Pixel")
+        plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+        im1 = axes[1].imshow(log_masked, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[1].set_title("Log Masked Image")
+        axes[1].set_xlabel("Pixel")
+        axes[1].set_ylabel("Pixel")
+        plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        plt.show()
+
+    return _restore_image_dimensionality(masked_stack, input_was_2d)
+
+

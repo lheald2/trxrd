@@ -16,8 +16,6 @@ Make sure to update the paths and parameters in globals.py
 
 from pathlib import Path
 import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
 
 import trxrd
 from globals import *
@@ -44,29 +42,16 @@ print("Counts shape:", data_dict["counts"].shape)
 print("Unique delays:", np.unique(data_dict["delay"]))
 
 # ------------------------------------------------------------
-# Apply beam stop mask
+# Build Masks
 # ------------------------------------------------------------
-masked_data = trxrd.apply_beamstop_mask(
-    data_array=data_dict["images"],
+image_shape = data_dict["images"].shape[1:]   # (rows, cols)
+
+combined_mask = trxrd.build_combined_mask(
+    image_shape=image_shape,
     center_xy=(MASK_CENTER_X, MASK_CENTER_Y),
     radius=MASK_RADIUS,
-    plot=False,
-    image_index=0,
-)
-
-data_dict["images"] = masked_data
-
-# ------------------------------------------------------------
-# Apply Detector Mask
-# ------------------------------------------------------------
-masked_images = trxrd.apply_nan_mask(
-    data_dict["images"],
     mask_path=MASK_FILE,
-    plot=False,
-    image_index=0,
 )
-
-data_dict["images"] = masked_images
 
 # ------------------------------------------------------------
 # Compute azimuthal average
@@ -79,7 +64,7 @@ az_result = trxrd.azimuthal_average_pyfai(
     unit=UNIT,
     nan_radial_range=(NAN_MIN, NAN_MAX),   # set Q < 0.3 to NaN
     azimuth_range=None,
-    integration_mask=None,
+    integration_mask=combined_mask,
     return_dict=True,
     progress_interval=100,
     use_custom_polarization=False,
