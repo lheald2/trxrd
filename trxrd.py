@@ -12,6 +12,8 @@ import concurrent.futures
 from functools import partial
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import savgol_filter
 from pyFAI.integrator.azimuthal import AzimuthalIntegrator
 from globals import *
 
@@ -724,7 +726,6 @@ def load_background(
         "background_std": background_std,
         "n_images": background_stack.shape[0],
     }
-
 
 
 def make_circular_mask(image_shape, center_xy, radius):
@@ -3768,260 +3769,35 @@ def lineouts_by_delay_from_per_image_profiles(
     return unique_delays, mean_lineouts, std_lineouts, sem_lineouts
 
 
-def compute_qualitative_difference_pdf(
-    q,
-    delta_iq,
-    r_max=20.0,
-    n_r=2000,
-    q_range=None,
-    window="lorch",
-    plot=False,
-    profile_index=0,
-    figsize=FIGSIZE,
-    return_dict=True,
-):
+def apply_gaussian_smoothing(matrix, sigma, dx=1.0, axis=0, mode="nearest"):
     """
-    Compute a difference PDF-like signal dG(r) from 1D difference scattering
-    data using a sine Fourier transform.
-
-    This function transforms either a single 1D difference profile or a 2D
-    stack of difference profiles from reciprocal space into real space using
-
-        dG(r) = (2 / pi) * integral[ Q * dI(Q) * M(Q) * sin(Qr) dQ ]
-
-    where M(Q) is an optional modification/window function such as the Lorch
-    function.
-
-    The implementation is partially vectorized:
-    - it loops over profiles in Python
-    - but computes all r values at once for each profile using NumPy array math
-
-    This gives a substantial speedup compared with looping over both profiles
-    and r values in Python.
+    Apply Gaussian smoothing to a 2D matrix along one axis.
 
     Parameters
     ----------
-    q : np.ndarray
-        1D Q axis of shape (n_q,), typically in inverse angstroms.
-    delta_iq : np.ndarray
-        Difference scattering data, either:
-        - 1D array of shape (n_q,)
-        - 2D array of shape (n_profiles, n_q)
-
-        This may be dI(Q), dI/I(Q), or another difference signal in Q-space.
-    r_max : float, optional
-        Maximum r value in angstroms for the output transform.
-    n_r : int, optional
-        Number of points in the output r axis.
-    q_range : tuple or None, optional
-        (q_min, q_max) range to keep before transforming.
-        If None, all finite Q values are used.
-    window : {"none", "lorch"}, optional
-        Modification function applied before the transform:
-        - "none"  : no windowing
-        - "lorch" : Lorch modification function
-    plot : bool, optional
-        If True, plot one example input Q-space profile and the corresponding
-        real-space transform.
-    profile_index : int, optional
-        Which profile to plot if `delta_iq` is 2D.
-        Ignored for 1D input.
-    figsize : tuple, optional
-        Figure size for plotting.
-    return_dict : bool, optional
-        If True, return a dictionary.
-        If False, return (r, dgr).
+    matrix : array-like
+        Input 2D array.
+    sigma : float
+        Gaussian sigma in the same units as dx.
+    dx : float, optional
+        Step size along the smoothed axis.
+    axis : int, optional
+        Axis to smooth along (0 or 1).
+    mode : str, optional
+        Boundary handling mode for scipy.ndimage.gaussian_filter1d.
 
     Returns
     -------
-    result : dict or tuple
-        If return_dict=True:
-            {
-                "r": np.ndarray of shape (n_r,),
-                "dgr": np.ndarray,
-                "q_used": np.ndarray,
-                "delta_iq_used": np.ndarray,
-                "window_values": np.ndarray,
-                "q_range": tuple or None,
-                "window": str,
-                "input_was_1d": bool,
-            }
-
-        If return_dict=False:
-            (r, dgr)
-
-        Output dimensionality matches input dimensionality:
-        - 1D input -> 1D dgr
-        - 2D input -> 2D dgr
-
-    Raises
-    ------
-    ValueError
-        If input dimensions are invalid, if q and delta_iq do not match in
-        length, if q_range is invalid, or if no valid Q points remain after
-        masking.
-
-    Notes
-    -----
-    - This function computes a difference PDF-like signal directly from the
-      supplied Q-space data.
-    - No atomic or compositional information is required for the transform
-      itself.
-    - Absolute physical interpretation of the resulting dG(r) depends on the
-      normalization of the input delta_iq.
-    - The Lorch window reduces termination ripples caused by finite Q range,
-      at the cost of some real-space broadening.
+    smoothed : np.ndarray
+        Smoothed matrix.
     """
-    q = np.asarray(q, dtype=float)
-    delta_iq = np.asarray(delta_iq, dtype=float)
+    matrix = np.asarray(matrix, dtype=float)
 
-    if q.ndim != 1:
-        raise ValueError("q must be 1D.")
+    if matrix.ndim != 2:
+        raise ValueError("matrix must be 2D")
 
-    if delta_iq.ndim == 1:
-        delta_2d = delta_iq[None, :]
-        input_was_1d = True
-    elif delta_iq.ndim == 2:
-        delta_2d = delta_iq
-        input_was_1d = False
-    else:
-        raise ValueError("delta_iq must be 1D or 2D.")
-
-    if delta_2d.shape[1] != q.shape[0]:
-        raise ValueError("delta_iq.shape[-1] must match len(q).")
-
-    if r_max <= 0:
-        raise ValueError("r_max must be positive.")
-    if n_r < 2:
-        raise ValueError("n_r must be at least 2.")
-
-    # ------------------------------------------------------------
-    # Select valid Q range
-    # ------------------------------------------------------------
-    valid_mask = np.isfinite(q)
-
-    if q_range is not None:
-        if len(q_range) != 2:
-            raise ValueError("q_range must be a tuple: (q_min, q_max)")
-        q_min, q_max = q_range
-        if q_min >= q_max:
-            raise ValueError("q_range must satisfy q_min < q_max")
-        valid_mask &= (q >= q_min) & (q <= q_max)
-
-    if not np.any(valid_mask):
-        raise ValueError("No valid Q points remain after applying q_range.")
-
-    q_used = q[valid_mask]
-    delta_used = delta_2d[:, valid_mask]
-
-    # ------------------------------------------------------------
-    # Build modification/window function
-    # ------------------------------------------------------------
-    if window == "none":
-        window_values = np.ones_like(q_used)
-
-    elif window == "lorch":
-        q_max_used = np.nanmax(q_used)
-        if not np.isfinite(q_max_used) or q_max_used <= 0:
-            raise ValueError("Maximum Q must be positive and finite for Lorch window.")
-
-        x = np.pi * q_used / q_max_used
-        window_values = np.ones_like(q_used)
-        nonzero = x != 0
-        window_values[nonzero] = np.sin(x[nonzero]) / x[nonzero]
-
-    else:
-        raise ValueError("window must be one of: 'none', 'lorch'")
-
-    # ------------------------------------------------------------
-    # Build r axis
-    # ------------------------------------------------------------
-    r = np.linspace(0.0, r_max, n_r)
-    dgr_2d = np.full((delta_used.shape[0], n_r), np.nan, dtype=float)
-
-    # ------------------------------------------------------------
-    # Partially vectorized sine transform
-    # ------------------------------------------------------------
-    for i in range(delta_used.shape[0]):
-        y = np.asarray(delta_used[i], dtype=float)
-
-        finite_mask = np.isfinite(y) & np.isfinite(q_used)
-        if np.sum(finite_mask) < 2:
-            continue
-
-        q_fit = q_used[finite_mask]
-        y_fit = y[finite_mask]
-        w_fit = window_values[finite_mask]
-
-        fq = q_fit * y_fit * w_fit
-
-        # Vectorized over all r values at once
-        sin_qr = np.sin(np.outer(q_fit, r))  # shape: (n_q_fit, n_r)
-
-        dgr_2d[i] = (2.0 / np.pi) * np.trapezoid(
-            fq[:, None] * sin_qr,
-            q_fit,
-            axis=0,
-        )
-
-    # ------------------------------------------------------------
-    # Restore original dimensionality
-    # ------------------------------------------------------------
-    if input_was_1d:
-        dgr = dgr_2d[0]
-        delta_iq_used = delta_used[0]
-    else:
-        dgr = dgr_2d
-        delta_iq_used = delta_used
-
-        if not (0 <= profile_index < delta_2d.shape[0]):
-            raise ValueError(
-                f"profile_index={profile_index} is out of bounds for {delta_2d.shape[0]} profile(s)."
-            )
-
-    # ------------------------------------------------------------
-    # Plot diagnostic example
-    # ------------------------------------------------------------
-    if plot:
-        if input_was_1d:
-            q_plot = delta_used[0]
-            dgr_plot = dgr_2d[0]
-            title_suffix = ""
-        else:
-            q_plot = delta_used[profile_index]
-            dgr_plot = dgr_2d[profile_index]
-            title_suffix = f" (Profile {profile_index})"
-
-        fig, axes = plt.subplots(1, 2, figsize=figsize)
-
-        axes[0].plot(q_used, q_plot, label="Input difference profile")
-        axes[0].set_xlabel(r"Q ($\mathrm{\AA}^{-1}$)")
-        axes[0].set_ylabel("Difference signal")
-        axes[0].set_title(f"Q-space Input{title_suffix}")
-        axes[0].legend()
-
-        axes[1].plot(r, dgr_plot, label="dG(r)")
-        axes[1].set_xlabel(r"r ($\mathrm{\AA}$)")
-        axes[1].set_ylabel("Difference PDF-like signal")
-        axes[1].set_title(f"Real-space Transform{title_suffix}")
-        axes[1].legend()
-
-        plt.tight_layout()
-        plt.show()
-
-    if return_dict:
-        return {
-            "r": r,
-            "dgr": dgr,
-            "q_used": q_used,
-            "delta_iq_used": delta_iq_used,
-            "window_values": window_values,
-            "q_range": q_range,
-            "window": window,
-            "input_was_1d": input_was_1d,
-        }
-
-    return r, dgr
+    sigma_points = sigma / dx
+    return gaussian_filter1d(matrix, sigma=sigma_points, axis=axis, mode=mode)
 
 
 # X-ray Simulation Functions
@@ -4260,6 +4036,228 @@ def compute_average_form_factors(
         }
 
     return f_avg, f2_avg
+
+## Calculate S(Q), F(Q), and dG(r) from I(Q) using average form factors
+
+def fit_iq_to_f2_high_q(
+    q,
+    iq,
+    f2_avg,
+    q_fit_range,
+    background="constant",
+    plot=False,
+    figsize=(7, 4),
+    return_dict=True,
+):
+    """
+    Fit a correction to I(Q) so that the corrected intensity matches <f^2(Q)>
+    over a chosen high-Q region.
+
+    The fitted model is:
+
+        I_corr(Q) = a * I(Q) + b(Q)
+
+    where b(Q) can be:
+        - "none"     : 0
+        - "constant" : b
+        - "linear"   : b + cQ
+
+    Parameters
+    ----------
+    q : np.ndarray
+        1D Q axis, shape (n_q,)
+    iq : np.ndarray
+        1D or 2D intensity array:
+        - (n_q,)
+        - (n_profiles, n_q)
+    f2_avg : np.ndarray
+        1D <f^2(Q)> array, shape (n_q,)
+    q_fit_range : tuple
+        (q_min, q_max) fit range for matching I(Q) to <f^2(Q)>
+    background : {"none", "constant", "linear"}
+        Background model to include in addition to the scale factor.
+    plot : bool
+        If True, plot the fit for one profile.
+    figsize : tuple
+        Figure size for plotting.
+    return_dict : bool
+        If True, return a dictionary, else return corrected intensity only.
+
+    Returns
+    -------
+    result : dict or np.ndarray
+        If return_dict=True:
+            {
+                "iq_corrected": corrected intensity array,
+                "fit_mask": boolean mask used for fitting,
+                "coefficients": fitted coefficients,
+                "background": background model,
+                "input_was_1d": bool,
+            }
+
+        coefficients are:
+            - "none"     : [a]
+            - "constant" : [a, b]
+            - "linear"   : [a, b, c]
+    """
+    q = np.asarray(q, dtype=float)
+    iq = np.asarray(iq, dtype=float)
+    f2_avg = np.asarray(f2_avg, dtype=float)
+
+    if q.ndim != 1:
+        raise ValueError("q must be 1D.")
+    if f2_avg.ndim != 1:
+        raise ValueError("f2_avg must be 1D.")
+    if len(q) != len(f2_avg):
+        raise ValueError("q and f2_avg must have the same length.")
+
+    if iq.ndim == 1:
+        iq_2d = iq[None, :]
+        input_was_1d = True
+    elif iq.ndim == 2:
+        iq_2d = iq
+        input_was_1d = False
+    else:
+        raise ValueError("iq must be 1D or 2D.")
+
+    if iq_2d.shape[1] != len(q):
+        raise ValueError("iq.shape[-1] must match len(q).")
+
+    if background not in ("none", "constant", "linear"):
+        raise ValueError("background must be 'none', 'constant', or 'linear'.")
+
+    if q_fit_range is None or len(q_fit_range) != 2:
+        raise ValueError("q_fit_range must be a tuple: (q_min, q_max).")
+
+    q_min, q_max = q_fit_range
+    if q_min >= q_max:
+        raise ValueError("q_fit_range must satisfy q_min < q_max.")
+
+    fit_mask = np.isfinite(q) & np.isfinite(f2_avg) & (q >= q_min) & (q <= q_max)
+    if np.sum(fit_mask) < 3:
+        raise ValueError("Not enough valid points in q_fit_range for fitting.")
+
+    q_fit = q[fit_mask]
+    y_target = f2_avg[fit_mask]
+
+    iq_corrected_2d = np.full_like(iq_2d, np.nan, dtype=float)
+    coefficients = []
+
+    for i in range(iq_2d.shape[0]):
+        y_iq = iq_2d[i, fit_mask]
+        finite = np.isfinite(y_iq) & np.isfinite(y_target) & np.isfinite(q_fit)
+
+        if np.sum(finite) < 3:
+            coefficients.append(None)
+            continue
+
+        x_iq = y_iq[finite]
+        x_q = q_fit[finite]
+        y = y_target[finite]
+
+        if background == "none":
+            A = x_iq[:, None]
+        elif background == "constant":
+            A = np.column_stack([x_iq, np.ones_like(x_iq)])
+        else:  # linear
+            A = np.column_stack([x_iq, np.ones_like(x_iq), x_q])
+
+        coeff = np.linalg.lstsq(A, y, rcond=None)[0]
+        coefficients.append(coeff)
+
+        if background == "none":
+            a = coeff[0]
+            iq_corrected_2d[i] = a * iq_2d[i]
+        elif background == "constant":
+            a, b = coeff
+            iq_corrected_2d[i] = a * iq_2d[i] + b
+        else:
+            a, b, c = coeff
+            iq_corrected_2d[i] = a * iq_2d[i] + b + c * q
+
+    if plot:
+        idx = 0
+        coeff = coefficients[idx]
+        if coeff is not None:
+            fig, ax = plt.subplots(figsize=figsize)
+
+            ax.plot(q, iq_2d[idx], label="Original I(Q)", alpha=0.6)
+            ax.plot(q, iq_corrected_2d[idx], label="Corrected I(Q)")
+            ax.plot(q, f2_avg, label=r"$\langle f^2(Q)\rangle$", linestyle="--")
+
+            ax.axvspan(q_min, q_max, alpha=0.15, label="Fit range")
+            ax.set_xlabel(r"Q ($\mathrm{\AA}^{-1}$)")
+            ax.set_ylabel("Intensity")
+            ax.set_title("High-Q Scale Fit")
+            ax.legend()
+            plt.tight_layout()
+            plt.show()
+
+    if input_was_1d:
+        iq_corrected = iq_corrected_2d[0]
+    else:
+        iq_corrected = iq_corrected_2d
+
+    if return_dict:
+        return {
+            "iq_corrected": iq_corrected,
+            "fit_mask": fit_mask,
+            "coefficients": coefficients[0] if input_was_1d else coefficients,
+            "background": background,
+            "input_was_1d": input_was_1d,
+        }
+
+    return iq_corrected
+
+
+def correct_iq(
+    q,
+    iq,
+    composition,
+    q_fit_range,
+    background="constant",
+    plot=False,
+    return_dict=True,
+):
+    """
+    Empirically correct I(Q) so that high-Q behavior matches <f^2(Q)>.
+    """
+    q = np.asarray(q, dtype=float)
+    iq = np.asarray(iq, dtype=float)
+
+    ff_result = compute_average_form_factors(
+        q=q,
+        composition=composition,
+        plot=False,
+        return_dict=True,
+    )
+
+    f2_avg = np.asarray(ff_result["f2_avg"], dtype=float)
+
+    fit_result = fit_iq_to_f2_high_q(
+        q=q,
+        iq=iq,
+        f2_avg=f2_avg,
+        q_fit_range=q_fit_range,
+        background=background,
+        plot=plot,
+        return_dict=True,
+    )
+
+    if return_dict:
+        return {
+            "q": q,
+            "iq_corrected": fit_result["iq_corrected"],
+            "coefficients": fit_result["coefficients"],
+            "fit_mask": fit_result["fit_mask"],
+            "background": fit_result["background"],
+            "f2_avg": f2_avg,
+            "composition_dict": ff_result["composition_dict"],
+            "atomic_fractions": ff_result["atomic_fractions"],
+            "input_was_1d": fit_result["input_was_1d"],
+        }
+
+    return fit_result["iq_corrected"]
 
 
 def normalize_xray_scattering_to_sq_fq(
@@ -4535,6 +4533,201 @@ def normalize_xray_scattering_to_sq_fq(
     return delta_sq, delta_fq
 
 
+def apply_polynomial_baseline(
+    q,
+    fq,
+    q_fit_range=None,
+    poly_order=2,
+    smooth_window=51,
+    smooth_polyorder=3,
+    plot=False,
+    profile_index=0,
+    figsize=(12, 4),
+    return_dict=True,
+):
+    """
+    Remove a slowly varying polynomial baseline from F(Q).
+
+    The polynomial is fit to a heavily smoothed version of F(Q), so that
+    broad baseline drift is modeled without strongly fitting the real
+    oscillatory structure.
+
+    Parameters
+    ----------
+    q : np.ndarray
+        1D Q axis of shape (n_q,)
+    fq : np.ndarray
+        F(Q), either:
+        - 1D array of shape (n_q,)
+        - 2D array of shape (n_profiles, n_q)
+    q_fit_range : tuple or None, optional
+        (q_min, q_max) range used for baseline fitting.
+        If None, use all finite Q points.
+    poly_order : int, optional
+        Polynomial order for the baseline fit.
+        Recommended: 1 or 2, sometimes 3.
+    smooth_window : int, optional
+        Window length for Savitzky-Golay smoothing.
+        Must be odd and greater than smooth_polyorder.
+    smooth_polyorder : int, optional
+        Polynomial order used in Savitzky-Golay smoothing.
+    plot : bool, optional
+        If True, plot one example profile.
+    profile_index : int, optional
+        Which profile to plot if fq is 2D.
+    figsize : tuple, optional
+        Figure size for plotting.
+    return_dict : bool, optional
+        If True, return a dictionary.
+        If False, return corrected F(Q) only.
+
+    Returns
+    -------
+    result : dict or np.ndarray
+        If return_dict=True:
+            {
+                "q": q,
+                "fq_corrected": np.ndarray,
+                "baseline": np.ndarray,
+                "fq_smoothed": np.ndarray,
+                "coefficients": list or np.ndarray,
+                "q_fit_range": tuple or None,
+                "poly_order": int,
+                "input_was_1d": bool,
+            }
+
+        If return_dict=False:
+            fq_corrected
+    """
+    q = np.asarray(q, dtype=float)
+    fq = np.asarray(fq, dtype=float)
+
+    if q.ndim != 1:
+        raise ValueError("q must be 1D.")
+
+    if fq.ndim == 1:
+        fq_2d = fq[None, :]
+        input_was_1d = True
+    elif fq.ndim == 2:
+        fq_2d = fq
+        input_was_1d = False
+    else:
+        raise ValueError("fq must be 1D or 2D.")
+
+    if fq_2d.shape[1] != q.shape[0]:
+        raise ValueError("fq.shape[-1] must match len(q).")
+
+    if poly_order < 0:
+        raise ValueError("poly_order must be >= 0.")
+
+    if smooth_window % 2 == 0:
+        smooth_window += 1  # force odd
+
+    if smooth_window <= smooth_polyorder:
+        raise ValueError("smooth_window must be greater than smooth_polyorder.")
+
+    fit_mask = np.isfinite(q)
+    if q_fit_range is not None:
+        if len(q_fit_range) != 2:
+            raise ValueError("q_fit_range must be a tuple: (q_min, q_max)")
+        q_min, q_max = q_fit_range
+        if q_min >= q_max:
+            raise ValueError("q_fit_range must satisfy q_min < q_max")
+        fit_mask &= (q >= q_min) & (q <= q_max)
+
+    if np.sum(fit_mask) < poly_order + 2:
+        raise ValueError("Not enough points to fit the requested polynomial baseline.")
+
+    fq_corrected_2d = np.full_like(fq_2d, np.nan, dtype=float)
+    baseline_2d = np.full_like(fq_2d, np.nan, dtype=float)
+    fq_smoothed_2d = np.full_like(fq_2d, np.nan, dtype=float)
+    coefficients = []
+
+    for i in range(fq_2d.shape[0]):
+        y = np.asarray(fq_2d[i], dtype=float)
+        finite = np.isfinite(q) & np.isfinite(y)
+
+        if np.sum(finite) < max(smooth_window, poly_order + 2):
+            coefficients.append(None)
+            continue
+
+        # interpolate over NaNs temporarily for smoothing only
+        y_interp = y.copy()
+        if not np.all(finite):
+            y_interp[~finite] = np.interp(q[~finite], q[finite], y[finite])
+
+        # smooth to isolate broad baseline trend
+        y_smooth = savgol_filter(y_interp, window_length=smooth_window, polyorder=smooth_polyorder)
+        fq_smoothed_2d[i] = y_smooth
+
+        local_fit_mask = fit_mask & np.isfinite(y_smooth)
+        x_fit = q[local_fit_mask]
+        y_fit = y_smooth[local_fit_mask]
+
+        coeff = np.polyfit(x_fit, y_fit, deg=poly_order)
+        coefficients.append(coeff)
+
+        baseline = np.polyval(coeff, q)
+        baseline_2d[i] = baseline
+        fq_corrected_2d[i] = y - baseline
+
+    if input_was_1d:
+        fq_corrected = fq_corrected_2d[0]
+        baseline = baseline_2d[0]
+        fq_smoothed = fq_smoothed_2d[0]
+        coefficients_out = coefficients[0]
+    else:
+        fq_corrected = fq_corrected_2d
+        baseline = baseline_2d
+        fq_smoothed = fq_smoothed_2d
+        coefficients_out = coefficients
+
+        if not (0 <= profile_index < fq_2d.shape[0]):
+            raise ValueError(
+                f"profile_index={profile_index} is out of bounds for {fq_2d.shape[0]} profile(s)."
+            )
+
+    if plot:
+        idx = 0 if input_was_1d else profile_index
+
+        fig, axes = plt.subplots(1, 2, figsize=figsize, sharex=True)
+
+        axes[0].plot(q, fq_2d[idx], label="Original F(Q)", alpha=0.7)
+        axes[0].plot(q, fq_smoothed_2d[idx], label="Smoothed F(Q)", linewidth=2)
+        axes[0].plot(q, baseline_2d[idx], label=f"Polynomial baseline (order {poly_order})", linewidth=2)
+        if q_fit_range is not None:
+            axes[0].axvspan(q_fit_range[0], q_fit_range[1], alpha=0.15, label="Fit range")
+        axes[0].axhline(0, linestyle="--")
+        axes[0].set_xlabel(r"Q ($\mathrm{\AA}^{-1}$)")
+        axes[0].set_ylabel("F(Q)")
+        axes[0].set_title("Baseline Fit")
+        axes[0].legend()
+
+        axes[1].plot(q, fq_corrected_2d[idx], label="Baseline-corrected F(Q)")
+        axes[1].axhline(0, linestyle="--")
+        axes[1].set_xlabel(r"Q ($\mathrm{\AA}^{-1}$)")
+        axes[1].set_ylabel("F(Q)")
+        axes[1].set_title("Corrected F(Q)")
+        axes[1].legend()
+
+        plt.tight_layout()
+        plt.show()
+
+    if return_dict:
+        return {
+            "q": q,
+            "fq_corrected": fq_corrected,
+            "baseline": baseline,
+            "fq_smoothed": fq_smoothed,
+            "coefficients": coefficients_out,
+            "q_fit_range": q_fit_range,
+            "poly_order": poly_order,
+            "input_was_1d": input_was_1d,
+        }
+
+    return fq_corrected
+
+
 def compute_delta_gr_from_delta_fq(
     q,
     delta_fq,
@@ -4785,7 +4978,7 @@ def compute_delta_gr_from_delta_fq(
 
     return r, delta_gr
 
-
+## Saving Functions
 def save_azimuthal_profiles_to_dat(
     radial,
     profiles,
@@ -5062,3 +5255,257 @@ def apply_beamstop_mask(
     return _restore_image_dimensionality(masked_stack, input_was_2d)
 
 
+def compute_qualitative_difference_pdf(
+    q,
+    delta_iq,
+    r_max=20.0,
+    n_r=2000,
+    q_range=None,
+    window="lorch",
+    plot=False,
+    profile_index=0,
+    figsize=FIGSIZE,
+    return_dict=True,
+):
+    """
+    Compute a difference PDF-like signal dG(r) from 1D difference scattering
+    data using a sine Fourier transform.
+
+    This function transforms either a single 1D difference profile or a 2D
+    stack of difference profiles from reciprocal space into real space using
+
+        dG(r) = (2 / pi) * integral[ Q * dI(Q) * M(Q) * sin(Qr) dQ ]
+
+    where M(Q) is an optional modification/window function such as the Lorch
+    function.
+
+    The implementation is partially vectorized:
+    - it loops over profiles in Python
+    - but computes all r values at once for each profile using NumPy array math
+
+    This gives a substantial speedup compared with looping over both profiles
+    and r values in Python.
+
+    Parameters
+    ----------
+    q : np.ndarray
+        1D Q axis of shape (n_q,), typically in inverse angstroms.
+    delta_iq : np.ndarray
+        Difference scattering data, either:
+        - 1D array of shape (n_q,)
+        - 2D array of shape (n_profiles, n_q)
+
+        This may be dI(Q), dI/I(Q), or another difference signal in Q-space.
+    r_max : float, optional
+        Maximum r value in angstroms for the output transform.
+    n_r : int, optional
+        Number of points in the output r axis.
+    q_range : tuple or None, optional
+        (q_min, q_max) range to keep before transforming.
+        If None, all finite Q values are used.
+    window : {"none", "lorch"}, optional
+        Modification function applied before the transform:
+        - "none"  : no windowing
+        - "lorch" : Lorch modification function
+    plot : bool, optional
+        If True, plot one example input Q-space profile and the corresponding
+        real-space transform.
+    profile_index : int, optional
+        Which profile to plot if `delta_iq` is 2D.
+        Ignored for 1D input.
+    figsize : tuple, optional
+        Figure size for plotting.
+    return_dict : bool, optional
+        If True, return a dictionary.
+        If False, return (r, dgr).
+
+    Returns
+    -------
+    result : dict or tuple
+        If return_dict=True:
+            {
+                "r": np.ndarray of shape (n_r,),
+                "dgr": np.ndarray,
+                "q_used": np.ndarray,
+                "delta_iq_used": np.ndarray,
+                "window_values": np.ndarray,
+                "q_range": tuple or None,
+                "window": str,
+                "input_was_1d": bool,
+            }
+
+        If return_dict=False:
+            (r, dgr)
+
+        Output dimensionality matches input dimensionality:
+        - 1D input -> 1D dgr
+        - 2D input -> 2D dgr
+
+    Raises
+    ------
+    ValueError
+        If input dimensions are invalid, if q and delta_iq do not match in
+        length, if q_range is invalid, or if no valid Q points remain after
+        masking.
+
+    Notes
+    -----
+    - This function computes a difference PDF-like signal directly from the
+      supplied Q-space data.
+    - No atomic or compositional information is required for the transform
+      itself.
+    - Absolute physical interpretation of the resulting dG(r) depends on the
+      normalization of the input delta_iq.
+    - The Lorch window reduces termination ripples caused by finite Q range,
+      at the cost of some real-space broadening.
+    """
+    q = np.asarray(q, dtype=float)
+    delta_iq = np.asarray(delta_iq, dtype=float)
+
+    if q.ndim != 1:
+        raise ValueError("q must be 1D.")
+
+    if delta_iq.ndim == 1:
+        delta_2d = delta_iq[None, :]
+        input_was_1d = True
+    elif delta_iq.ndim == 2:
+        delta_2d = delta_iq
+        input_was_1d = False
+    else:
+        raise ValueError("delta_iq must be 1D or 2D.")
+
+    if delta_2d.shape[1] != q.shape[0]:
+        raise ValueError("delta_iq.shape[-1] must match len(q).")
+
+    if r_max <= 0:
+        raise ValueError("r_max must be positive.")
+    if n_r < 2:
+        raise ValueError("n_r must be at least 2.")
+
+    # ------------------------------------------------------------
+    # Select valid Q range
+    # ------------------------------------------------------------
+    valid_mask = np.isfinite(q)
+
+    if q_range is not None:
+        if len(q_range) != 2:
+            raise ValueError("q_range must be a tuple: (q_min, q_max)")
+        q_min, q_max = q_range
+        if q_min >= q_max:
+            raise ValueError("q_range must satisfy q_min < q_max")
+        valid_mask &= (q >= q_min) & (q <= q_max)
+
+    if not np.any(valid_mask):
+        raise ValueError("No valid Q points remain after applying q_range.")
+
+    q_used = q[valid_mask]
+    delta_used = delta_2d[:, valid_mask]
+
+    # ------------------------------------------------------------
+    # Build modification/window function
+    # ------------------------------------------------------------
+    if window == "none":
+        window_values = np.ones_like(q_used)
+
+    elif window == "lorch":
+        q_max_used = np.nanmax(q_used)
+        if not np.isfinite(q_max_used) or q_max_used <= 0:
+            raise ValueError("Maximum Q must be positive and finite for Lorch window.")
+
+        x = np.pi * q_used / q_max_used
+        window_values = np.ones_like(q_used)
+        nonzero = x != 0
+        window_values[nonzero] = np.sin(x[nonzero]) / x[nonzero]
+
+    else:
+        raise ValueError("window must be one of: 'none', 'lorch'")
+
+    # ------------------------------------------------------------
+    # Build r axis
+    # ------------------------------------------------------------
+    r = np.linspace(0.0, r_max, n_r)
+    dgr_2d = np.full((delta_used.shape[0], n_r), np.nan, dtype=float)
+
+    # ------------------------------------------------------------
+    # Partially vectorized sine transform
+    # ------------------------------------------------------------
+    for i in range(delta_used.shape[0]):
+        y = np.asarray(delta_used[i], dtype=float)
+
+        finite_mask = np.isfinite(y) & np.isfinite(q_used)
+        if np.sum(finite_mask) < 2:
+            continue
+
+        q_fit = q_used[finite_mask]
+        y_fit = y[finite_mask]
+        w_fit = window_values[finite_mask]
+
+        fq = q_fit * y_fit * w_fit
+
+        # Vectorized over all r values at once
+        sin_qr = np.sin(np.outer(q_fit, r))  # shape: (n_q_fit, n_r)
+
+        dgr_2d[i] = (2.0 / np.pi) * np.trapezoid(
+            fq[:, None] * sin_qr,
+            q_fit,
+            axis=0,
+        )
+
+    # ------------------------------------------------------------
+    # Restore original dimensionality
+    # ------------------------------------------------------------
+    if input_was_1d:
+        dgr = dgr_2d[0]
+        delta_iq_used = delta_used[0]
+    else:
+        dgr = dgr_2d
+        delta_iq_used = delta_used
+
+        if not (0 <= profile_index < delta_2d.shape[0]):
+            raise ValueError(
+                f"profile_index={profile_index} is out of bounds for {delta_2d.shape[0]} profile(s)."
+            )
+
+    # ------------------------------------------------------------
+    # Plot diagnostic example
+    # ------------------------------------------------------------
+    if plot:
+        if input_was_1d:
+            q_plot = delta_used[0]
+            dgr_plot = dgr_2d[0]
+            title_suffix = ""
+        else:
+            q_plot = delta_used[profile_index]
+            dgr_plot = dgr_2d[profile_index]
+            title_suffix = f" (Profile {profile_index})"
+
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+        axes[0].plot(q_used, q_plot, label="Input difference profile")
+        axes[0].set_xlabel(r"Q ($\mathrm{\AA}^{-1}$)")
+        axes[0].set_ylabel("Difference signal")
+        axes[0].set_title(f"Q-space Input{title_suffix}")
+        axes[0].legend()
+
+        axes[1].plot(r, dgr_plot, label="dG(r)")
+        axes[1].set_xlabel(r"r ($\mathrm{\AA}$)")
+        axes[1].set_ylabel("Difference PDF-like signal")
+        axes[1].set_title(f"Real-space Transform{title_suffix}")
+        axes[1].legend()
+
+        plt.tight_layout()
+        plt.show()
+
+    if return_dict:
+        return {
+            "r": r,
+            "dgr": dgr,
+            "q_used": q_used,
+            "delta_iq_used": delta_iq_used,
+            "window_values": window_values,
+            "q_range": q_range,
+            "window": window,
+            "input_was_1d": input_was_1d,
+        }
+
+    return r, dgr
