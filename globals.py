@@ -23,26 +23,16 @@ DELAY_SIGN = -1 # Check file naming scheme, sometimes positives delays have "-" 
 # ============================================================
 # Beam Stop Mask Defaults
 # ============================================================
-MASK_CENTER_X = 49
-MASK_CENTER_Y = 1667
-MASK_RADIUS = 30
+MASK_CENTER_X = 50
+MASK_CENTER_Y = 1670
+MASK_RADIUS = 20
 
 # ============================================================
 # Center Guess and Sampling Defaults
 # ============================================================
-CENTER_X = 44.5
-CENTER_Y = 1665.31
+CENTER_X = 44
+CENTER_Y = 1665
 DOWNSAMPLE = 2 # Downsample factor for center finding, e.g. 2 means use every other pixel, 4 means use every 4th pixel, etc.
-
-# ============================================================
-# Azimuthal Averaging and Normalization Defaults
-# ============================================================
-UNIT = "q_A^-1" # Unit for x-axis of azimuthally averaged data, e.g. "q_A^-1" for inverse Angstroms, "2theta_deg" for degrees, etc. 
-NAN_MIN = 0.35 # Minimum value for valid data, values below this will be set to NaN, e.g. 0.35 or None for no minimum threshold
-NAN_MAX = None # Maximum value for valid data, values above this will be set to NaN, e.g. 1.0 or None for no maximum threshold
-NORM_MIN = 4.0 # Minimum value for normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
-NORM_MAX = 4.2 # Maximum value for normalization, values above this will be set to this value before normalization, e.g. 1.0 or None for no maximum threshold
-N_POINTS = 3000 # Number of points for azimuthal averaging, e.g. 3000 or None to use all pixels
 
 # ============================================================
 # Detector Parameters and Defaults
@@ -50,7 +40,7 @@ N_POINTS = 3000 # Number of points for azimuthal averaging, e.g. 3000 or None to
 # Detector and beam parameters
 PIXEL1 = 1.72e-4                 # m, detector pixel size along rows (y)
 PIXEL2 = 1.72e-4                 # m, detector pixel size along cols (x)
-DISTANCE = 0.17236             # m, sample-to-detector distance
+DISTANCE = 0.17236                 # m, sample-to-detector distance
 WAVELENGTH = 0.39738514824147314e-10          # m
 
 # Detector orientation
@@ -62,6 +52,22 @@ ROT3 = 0.0                      # rad, in-plane detector rotation
 POLARIZATION_FACTOR = 0.999      # e.g. 0.99 or None
 DARK = None                     # 2D dark image or None
 FLAT = None                     # 2D flat-field image or None
+
+# ============================================================
+# Azimuthal Averaging and Normalization Defaults
+# ============================================================
+UNIT = "q_A^-1" # Unit for x-axis of azimuthally averaged data, e.g. "q_A^-1" for inverse Angstroms, "2theta_deg" for degrees, etc. 
+NAN_MIN = 0.35 # Minimum value for valid data, values below this will be set to NaN, e.g. 0.35 or None for no minimum threshold
+NAN_MAX = None # Maximum value for valid data, values above this will be set to NaN, e.g. 1.0 or None for no maximum threshold
+NORM_MIN = 4.05 # Minimum value for normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
+NORM_MAX = 4.25 # Maximum value for normalization, values above this will be set to this value before normalization, e.g. 1.0 or None for no maximum threshold
+N_POINTS = 3000 # Number of points for azimuthal averaging, e.g. 3000 or None to use all pixels
+
+# ============================================================
+# Background Subtraction Defaults
+# ============================================================
+BACKGROUND_NORM_MIN = 1.2 # Minimum value for background normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
+BACKGROUND_NORM_MAX = 1.8 # Maximum value for background normalization, values above this
 
 # ============================================================
 # Baseline Subtraction Defaults

@@ -780,11 +780,17 @@ def build_combined_mask(
     radius,
     detector_mask=None,
     mask_path=None,
+    plot=False,
+    example_image=None,
+    figsize=FIGSIZE,
+    use_shared_color_scale=True,
 ):
     """
     Build a combined boolean mask from:
     - circular beam stop mask
     - detector mask
+
+    Optionally plot the mask on an example image.
 
     Parameters
     ----------
@@ -798,6 +804,14 @@ def build_combined_mask(
         Preloaded 2D boolean detector mask where True = masked.
     mask_path : str or Path, optional
         Path to detector mask file. Used only if detector_mask is None.
+    plot : bool, optional
+        If True, plot the example image with mask overlay and masked image.
+    example_image : np.ndarray, optional
+        2D image used for visualization if plot=True.
+    figsize : tuple, optional
+        Figure size for plotting.
+    use_shared_color_scale : bool, optional
+        If True, both panels use the same color scale.
 
     Returns
     -------
@@ -814,14 +828,59 @@ def build_combined_mask(
         detector_mask = load_detector_mask(mask_path)
 
     if detector_mask is None:
-        return beamstop_mask
+        combined_mask = beamstop_mask
+    else:
+        if detector_mask.shape != image_shape:
+            raise ValueError(
+                f"Detector mask shape {detector_mask.shape} does not match image shape {image_shape}."
+            )
+        combined_mask = beamstop_mask | detector_mask
 
-    if detector_mask.shape != image_shape:
-        raise ValueError(
-            f"Detector mask shape {detector_mask.shape} does not match image shape {image_shape}."
-        )
+    if plot:
+        if example_image is None:
+            raise ValueError("example_image must be provided when plot=True.")
+        if example_image.shape != image_shape:
+            raise ValueError(
+                f"example_image shape {example_image.shape} does not match image shape {image_shape}."
+            )
 
-    combined_mask = beamstop_mask | detector_mask
+        original_image = np.array(example_image, dtype=float)
+
+        # make a masked copy for display
+        masked_image = original_image.copy()
+        masked_image[combined_mask] = np.nan
+
+        # safe log transform for visualization
+        log_original = np.log1p(np.clip(original_image, a_min=0, a_max=None))
+        log_masked = np.log1p(np.clip(masked_image, a_min=0, a_max=None))
+
+        if use_shared_color_scale:
+            finite_vals = log_original[np.isfinite(log_original)]
+            vmin = np.nanmin(finite_vals)
+            vmax = np.nanmax(finite_vals)
+        else:
+            vmin = None
+            vmax = None
+
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+        im0 = axes[0].imshow(log_original, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[0].contour(combined_mask, levels=[0.5], colors="white", linewidths=1.5)
+        axes[0].scatter([center_xy[0]], [center_xy[1]], color="white", s=20, marker="x")
+        axes[0].set_title("Log Image with Combined Mask")
+        axes[0].set_xlabel("Pixel")
+        axes[0].set_ylabel("Pixel")
+        plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+        im1 = axes[1].imshow(log_masked, cmap="viridis", vmin=vmin, vmax=vmax)
+        axes[1].set_title("Log Masked Image")
+        axes[1].set_xlabel("Pixel")
+        axes[1].set_ylabel("Pixel")
+        plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        plt.show()
+
     return combined_mask
 
 
@@ -3129,7 +3188,7 @@ def normalize_profiles_to_range(
 
         x = np.arange(len(factors))
         ax.plot(x, factors, lw=1.5, label="Normalization factor")
-        ax.axhline(0, color="k", linestyle="--", alpha=0.6)
+        # ax.axhline(0, color="k", linestyle="--", alpha=0.6)
 
         negative_mask = factors < 0
         if np.any(negative_mask):
@@ -3862,6 +3921,43 @@ def load_form_factor(element):
     return lambda q: t1(q) + t2(q) + t3(q) + t4(q)
 
 
+def parse_composition_string(formula):
+    """
+    Parse a chemical formula with integer or decimal stoichiometries.
+
+    Examples
+    --------
+    BaTiO3 -> {'Ba': 1.0, 'Ti': 1.0, 'O': 3.0}
+    Cs0.097Pb1C0.904N1.679I1.798Br1.105Cl0.097
+        -> {'Cs': 0.097, 'Pb': 1.0, 'C': 0.904, 'N': 1.679,
+            'I': 1.798, 'Br': 1.105, 'Cl': 0.097}
+    """
+    if not isinstance(formula, str) or not formula.strip():
+        raise ValueError("Formula must be a non-empty string.")
+
+    formula = formula.strip()
+    pattern = r"([A-Z][a-z]?)(\d*\.?\d*)"
+    matches = list(re.finditer(pattern, formula))
+
+    if not matches:
+        raise ValueError(f"Could not parse composition: {formula}")
+
+    composition_dict = {}
+    consumed = ""
+
+    for m in matches:
+        elem = m.group(1)
+        count = m.group(2)
+        count_val = float(count) if count else 1.0
+        composition_dict[elem] = composition_dict.get(elem, 0.0) + count_val
+        consumed += m.group(0)
+
+    if consumed != formula:
+        raise ValueError(f"Could not fully parse composition: {formula}")
+
+    return composition_dict
+
+
 def compute_average_form_factors(
     q,
     composition,
@@ -3937,17 +4033,10 @@ def compute_average_form_factors(
     # Parse composition
     # ------------------------------------------------------------
     if isinstance(composition, str):
-        tokens = re.findall(r"([A-Z][a-z]?)(\d*)", composition)
-        if not tokens:
-            raise ValueError(f"Could not parse composition: {composition}")
-
-        composition_dict = {}
-        for elem, count in tokens:
-            count = int(count) if count else 1
-            composition_dict[elem] = composition_dict.get(elem, 0) + count
+        composition_dict = parse_composition_string(composition)
 
     elif isinstance(composition, dict):
-        composition_dict = composition.copy()
+        composition_dict = {elem: float(count) for elem, count in composition.items()}
 
     else:
         raise ValueError("composition must be a string or dict")
