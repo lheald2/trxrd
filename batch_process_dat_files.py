@@ -28,9 +28,9 @@ print(f"{len(file_names)} TIFF files found in {DATA_PATH}.")
 # ------------------------------------------------------------
 # Load data
 # ------------------------------------------------------------
-data_dict = trxrd.get_image_details(
+data_dict = trxrd.get_images_by_scan_name(
     folder_path=DATA_PATH,
-    sample_name=SCAN_NAME,   
+    scan_name=SCAN_NAME,
     sort=True,
     filter_data=False,
     plot=False,
@@ -39,7 +39,6 @@ data_dict = trxrd.get_image_details(
 print(data_dict.keys())
 print("Images shape:", data_dict["images"].shape)
 print("Counts shape:", data_dict["counts"].shape)
-print("Unique delays:", np.unique(data_dict["delay"]))
 
 # ------------------------------------------------------------
 # Build Masks
@@ -100,38 +99,21 @@ profiles_norm = norm_result["normalized_profiles"]
 
 SAVE_PATH.mkdir(parents=True, exist_ok=True)
 
-delays = data_dict["delay"]
-# If you also want fluence, include it if available:
-fluence = data_dict.get("fluence", None)
+# delays = data_dict["delay"]
+# # If you also want fluence, include it if available:
+# fluence = data_dict.get("fluence", None)
 
 for i, profile in enumerate(profiles_norm):
 
-    # Skip bad profiles
     if not np.any(np.isfinite(profile)):
         print(f"Skipping index {i} (all NaN)")
         continue
 
-    # --------------------------------------------------------
-    # Build filename
-    # --------------------------------------------------------
-    delay_val = delays[i]
-
-    # Format delay nicely (adjust as needed)
-    delay_str = f"{delay_val:.0f}fs"
-
-    if fluence is not None:
-        fluence_val = fluence[i]
-        filename = f"{SCAN_NAME}_{fluence_val:.0f}uJ_{delay_str}_{i:05d}.dat"
-    else:
-        filename = f"{SCAN_NAME}_{delay_str}_{i:05d}.dat"
-
+    input_file = Path(data_dict["file_names"][i])
+    filename = input_file.with_suffix(".dat").name
     output_file = SAVE_PATH / filename
 
-    # --------------------------------------------------------
-    # Save (q, I) columns
-    # --------------------------------------------------------
     valid_mask = np.isfinite(q) & np.isfinite(profile)
-
     data_to_save = np.column_stack((q[valid_mask], profile[valid_mask]))
 
     header = "q (A^-1)\tI_normalized (a.u.)"

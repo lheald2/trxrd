@@ -8,9 +8,10 @@ from pathlib import Path
 # ============================================================
 DATA_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BTO400_S3") # Path to directory containing TIFF files
 MASK_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\TRXRDPython\testdata\mask_2021_dec.tif") # Path to mask file
-SCAN_NAME = "BTO400nmS3_240Ksurv3" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
-BACKGROUND_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BlankSubstratePinkBeam\blankglasspinkM3_0.3-deg_theta2.735samz00001_012.tif")
-SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data") # Path to directory where processed data will be saved, e.g. as .h5 file
+SCAN_NAME = "BTO400nmS3_360Kre4" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
+SCAN_TYPE = "delay_scan" # Type of scan based on filename pattern, e.g. "delay_scan", "theta_samz", etc. Must correspond to a key in the "filename_patterns" dictionary in trxrd.py
+BACKGROUND_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BlankSubstratePinkBeam\blanksubstratePinkBeam285K-1.0fshw-4e-09delay00004_045.tif")
+SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO400nmS3_360Kre4") # Path to directory where processed data will be saved, e.g. as .h5 file
 
 # ============================================================
 # General Defaults
@@ -23,15 +24,15 @@ DELAY_SIGN = -1 # Check file naming scheme, sometimes positives delays have "-" 
 # ============================================================
 # Beam Stop Mask Defaults
 # ============================================================
-MASK_CENTER_X = 50
-MASK_CENTER_Y = 1670
-MASK_RADIUS = 20
+MASK_CENTER_X = 52
+MASK_CENTER_Y = 1667
+MASK_RADIUS = 30
 
 # ============================================================
 # Center Guess and Sampling Defaults
 # ============================================================
 CENTER_X = 44
-CENTER_Y = 1665
+CENTER_Y = 1666
 DOWNSAMPLE = 2 # Downsample factor for center finding, e.g. 2 means use every other pixel, 4 means use every 4th pixel, etc.
 
 # ============================================================
@@ -40,7 +41,7 @@ DOWNSAMPLE = 2 # Downsample factor for center finding, e.g. 2 means use every ot
 # Detector and beam parameters
 PIXEL1 = 1.72e-4                 # m, detector pixel size along rows (y)
 PIXEL2 = 1.72e-4                 # m, detector pixel size along cols (x)
-DISTANCE = 0.17236                 # m, sample-to-detector distance
+DISTANCE = 0.1723                 # m, sample-to-detector distance
 WAVELENGTH = 0.39738514824147314e-10          # m
 
 # Detector orientation
@@ -66,8 +67,8 @@ N_POINTS = 3000 # Number of points for azimuthal averaging, e.g. 3000 or None to
 # ============================================================
 # Background Subtraction Defaults
 # ============================================================
-BACKGROUND_NORM_MIN = 1.2 # Minimum value for background normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
-BACKGROUND_NORM_MAX = 1.8 # Maximum value for background normalization, values above this
+BACKGROUND_NORM_MIN = 1.0 # Minimum value for background normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
+BACKGROUND_NORM_MAX = 1.5 # Maximum value for background normalization, values above this will be set to this value before normalization, e.g. 1.0 or None for no maximum threshold
 
 # ============================================================
 # Baseline Subtraction Defaults
@@ -78,7 +79,7 @@ P_VAL = 0.05
 # ============================================================
 # PDF Calcuation Defaults
 # ============================================================
-COMPOSITION = "BaTiO3" # Sample composition for form factor calculation, e.g. "BaTiO3" or None for no form factor correction
+COMPOSITION = "WO3" # Sample composition for form factor calculation, e.g. "BaTiO3" or None for no form factor correction
 R_MAX = 20.0 # Maximum r value for PDF calculation, e.g. 20.0 or None for no maximum
 N_R = 2000 # Number of r points for PDF calculation, e.g.
 Q_MIN = 0.5 # Minimum q value for PDF calculation, e.g. 0.5 or None for no minimum

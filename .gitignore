@@ -16,4 +16,6 @@ build/
 *.cbf
 *.npy
 *.npz
+*.txt
+*.csv
 .DS_Store
