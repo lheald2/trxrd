@@ -1,7 +1,7 @@
-
-import numpy as np
-import re
 from pathlib import Path
+import numpy as np
+
+# Experimental Parameters and Defaults
 
 # ============================================================
 # Data and Mask Paths, Scan Name, and Filename Pattern
@@ -38,6 +38,9 @@ DOWNSAMPLE = 2 # Downsample factor for center finding, e.g. 2 means use every ot
 # ============================================================
 # Detector Parameters and Defaults
 # ============================================================
+# PONI file from pyFAI-calib2. Set to a Path to use PONI geometry;
+# set to None to use the manual parameters below.
+PONI_FILE = None                 # Path to .poni file, or None
 # Detector and beam parameters
 PIXEL1 = 1.72e-4                 # m, detector pixel size along rows (y)
 PIXEL2 = 1.72e-4                 # m, detector pixel size along cols (x)

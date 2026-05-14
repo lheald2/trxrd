@@ -8,6 +8,8 @@ from trxrd.io import (
     load_background,
     save_azimuthal_profiles_to_dat,
     get_gr_details,
+    get_grs_by_scan_name,
+    read_tif_metadata,
 )
 
 from trxrd.masking import (

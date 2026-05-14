@@ -12,6 +12,7 @@ from globals import (
     NORM_MIN, NORM_MAX,
     LAM_VAL, P_VAL,
     MAX_PROCESSORS,
+    PONI_FILE,
 )
 from trxrd.io import _as_image_stack
 from trxrd.integration import (
@@ -25,6 +26,7 @@ from trxrd.integration import (
 def compute_background_azimuthal_average(
     background_input,
     centers_xy=None,
+    poni_path=PONI_FILE,
     center_guess_yx=(CENTER_Y, CENTER_X),
     compute_center_if_missing=True,
     center_from="mean",
@@ -73,7 +75,13 @@ def compute_background_azimuthal_average(
         - dict containing "background_stack" or "background_mean"
     centers_xy : array-like or None, optional
         Beam center(s) in (x, y) pixel coordinates.
-        If None, centers will be computed if compute_center_if_missing=True.
+        If None and poni_path is provided, the center is read from the PONI file.
+        If None and poni_path is None, centers are computed if compute_center_if_missing=True.
+    poni_path : path-like or None, optional
+        Path to a .poni file produced by pyFAI-calib2. When supplied, the PONI
+        geometry (distance, wavelength, tilt, center) is used and the manual
+        detector parameters in azimuthal_average_pyfai are ignored.
+        Defaults to PONI_FILE from globals.
     center_guess_yx : tuple, optional
         Initial guess for center finding as (y, x).
     compute_center_if_missing : bool, optional
@@ -183,9 +191,11 @@ def compute_background_azimuthal_average(
 
     if centers_xy is not None:
         centers_xy_array = _normalize_centers_xy(centers_xy, n_bg, use_average_center=False)
+    elif poni_path is not None:
+        centers_xy_array = None  # azimuthal_average_pyfai reads the center from the poni file
     else:
         if not compute_center_if_missing:
-            raise ValueError("centers_xy is None and compute_center_if_missing=False.")
+            raise ValueError("centers_xy is None, poni_path is None, and compute_center_if_missing=False.")
 
         if center_from == "mean":
             mean_bg = np.nanmean(background_images, axis=0)
@@ -228,6 +238,7 @@ def compute_background_azimuthal_average(
     pyfai_result = azimuthal_average_pyfai(
         images=background_images,
         centers_xy=centers_xy_array,
+        poni_path=poni_path,
         npt=npt,
         radial_range=radial_range,
         nan_radial_range=nan_radial_range,
@@ -246,6 +257,9 @@ def compute_background_azimuthal_average(
         max_workers=max_workers,
         progress_interval=progress_interval,
     )
+
+    if centers_xy_array is None:
+        centers_xy_array = pyfai_result["centers_used_xy"]
 
     radial = pyfai_result["radial"]
     background_profiles = pyfai_result["profiles"]

@@ -9,16 +9,79 @@ column is the q values (in inverse Angstroms) and the second column is the norma
 background-subtracted intensity values. The code is designed to be run in batch mode, processing all 
 relevant .tif files in the specified data directory and saving the processed .dat files to the 
 specified output directory. 
-
-Note: This code relies on the globals.py configuration file for paths, parameters, and settings. 
-Make sure to update the paths and parameters in globals.py
 """
 
 from pathlib import Path
 import numpy as np
 
 import trxrd
-from globals import *
+
+# Experimental Parameters and Defaults
+# ============================================================
+# Data and Mask Paths, Scan Name, and Filename Pattern
+# ============================================================
+DATA_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BTO400_S3") # Path to directory containing TIFF files
+MASK_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\TRXRDPython\testdata\mask_2021_dec.tif") # Path to mask file
+SCAN_NAME = "BTO400nmS3_360Kre4" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
+SCAN_TYPE = "delay_scan" # Type of scan based on filename pattern, e.g. "delay_scan", "theta_samz", etc. Must correspond to a key in the "filename_patterns" dictionary in trxrd.py
+BACKGROUND_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BlankSubstratePinkBeam\blanksubstratePinkBeam285K-1.0fshw-4e-09delay00004_045.tif")
+SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO400nmS3_360Kre4") # Path to directory where processed data will be saved, e.g. as .h5 file
+
+# ============================================================
+# General Defaults
+# ============================================================
+FIGSIZE = (10, 4)
+STD_FACTOR = 3
+MAX_PROCESSORS = 4
+DELAY_SIGN = -1 # Check file naming scheme, sometimes positives delays have "-" in front and negative have no sign so need to invert sign
+
+# ============================================================
+# Beam Stop Mask Defaults
+# ============================================================
+MASK_CENTER_X = 52
+MASK_CENTER_Y = 1667
+MASK_RADIUS = 30
+
+# ============================================================
+# Center Guess and Sampling Defaults
+# ============================================================
+CENTER_X = 44
+CENTER_Y = 1666
+DOWNSAMPLE = 2 # Downsample factor for center finding, e.g. 2 means use every other pixel, 4 means use every 4th pixel, etc.
+
+# ============================================================
+# Detector Parameters and Defaults
+# ============================================================
+# PONI file from pyFAI-calib2. Set to a Path to use PONI geometry;
+# set to None to use the manual parameters below.
+PONI_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\CeO2\low_keV\CeO2_poni.poni")                # Path to .poni file, or None
+# Detector and beam parameters
+PIXEL1 = 1.72e-4                 # m, detector pixel size along rows (y)
+PIXEL2 = 1.72e-4                 # m, detector pixel size along cols (x)
+DISTANCE = 0.1723                 # m, sample-to-detector distance
+WAVELENGTH = 0.39738514824147314e-10          # m
+
+# Detector orientation
+TILT_ANGLE = np.deg2rad(0)               # rad
+TILT_PLANE_ROTATION = np.deg2rad(90)      # rad
+ROT3 = 0.0                      # rad, in-plane detector rotation
+
+# Optional corrections
+POLARIZATION_FACTOR = 0.999      # e.g. 0.99 or None
+DARK = None                     # 2D dark image or None
+FLAT = None                     # 2D flat-field image or None
+
+# ============================================================
+# Azimuthal Averaging and Normalization Defaults
+# ============================================================
+UNIT = "q_A^-1" # Unit for x-axis of azimuthally averaged data, e.g. "q_A^-1" for inverse Angstroms, "2theta_deg" for degrees, etc. 
+NAN_MIN = 0.35 # Minimum value for valid data, values below this will be set to NaN, e.g. 0.35 or None for no minimum threshold
+NAN_MAX = None # Maximum value for valid data, values above this will be set to NaN, e.g. 1.0 or None for no maximum threshold
+NORM_MIN = 1.25 # Minimum value for normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
+NORM_MAX = 1.50 # Maximum value for normalization, values above this will be set to this value before normalization, e.g. 1.0 or None for no maximum threshold
+N_POINTS = 3000 # Number of points for azimuthal averaging, e.g. 3000 or None to use all pixels
+
+
 
 # Check number of files in folder 
 file_names = sorted(DATA_PATH.glob(f"{SCAN_NAME}*.tif"))
@@ -55,22 +118,41 @@ combined_mask = trxrd.build_combined_mask(
 # ------------------------------------------------------------
 # Compute azimuthal average
 # ------------------------------------------------------------
-az_result = trxrd.azimuthal_average_pyfai(
-    images=data_dict["images"],
-    centers_xy=(CENTER_X, CENTER_Y),   # note: (x, y)
-    polarization_factor=POLARIZATION_FACTOR,
-    npt=N_POINTS,
-    unit=UNIT,
-    nan_radial_range=(NAN_MIN, NAN_MAX),   # set Q < 0.3 to NaN
-    azimuth_range=None,
-    integration_mask=combined_mask,
-    return_dict=True,
-    progress_interval=100,
-    use_custom_polarization=False,
-    integration_function="integrate1d",
-    correct_solid_angle=False,
-    method=("bbox", "csr", "cython")
-)
+if PONI_FILE is not None:
+    az_result = trxrd.azimuthal_average_pyfai(
+        images=data_dict["images"],
+        poni_path=PONI_FILE,
+        npt=N_POINTS,
+        unit=UNIT,
+        nan_radial_range=(NAN_MIN, NAN_MAX),   # set Q < 0.3 to NaN
+        azimuth_range=None,
+        integration_mask=combined_mask,
+        return_dict=True,
+        progress_interval=100,
+        use_custom_polarization=False,
+        integration_function="integrate1d",
+        correct_solid_angle=False,
+        method=("bbox", "csr", "cython")
+    )
+else:
+    az_result = trxrd.azimuthal_average_manual(
+        images=data_dict["images"],
+        center_xy=(CENTER_X, CENTER_Y),
+        pixel_size=(PIXEL1, PIXEL2),
+        distance=DISTANCE,
+        wavelength=WAVELENGTH,
+        tilt_angles=(TILT_ANGLE, TILT_PLANE_ROTATION, ROT3),
+        npt=N_POINTS,
+        unit=UNIT,
+        nan_radial_range=(NAN_MIN, NAN_MAX),   # set Q < 0.3 to NaN
+        azimuth_range=None,
+        integration_mask=combined_mask,
+        return_dict=True,
+        progress_interval=100,
+        polarization_factor=POLARIZATION_FACTOR,
+        dark=DARK,
+        flat=FLAT,
+    )
 
 q = az_result["radial"]
 profiles = az_result["profiles"]

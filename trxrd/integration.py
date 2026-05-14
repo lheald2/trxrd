@@ -2,6 +2,7 @@ import concurrent.futures
 
 import numpy as np
 import matplotlib.pyplot as plt
+import pyFAI
 from pyFAI.integrator.azimuthal import AzimuthalIntegrator
 
 from globals import (
@@ -11,7 +12,7 @@ from globals import (
     TILT_ANGLE, TILT_PLANE_ROTATION, ROT3,
     POLARIZATION_FACTOR, DARK, FLAT,
     UNIT, NAN_MIN, NAN_MAX, N_POINTS,
-    MAX_PROCESSORS,
+    MAX_PROCESSORS, PONI_FILE,
 )
 from trxrd.io import _as_image_stack, _restore_image_dimensionality
 from trxrd.masking import build_pyfai_mask
@@ -87,7 +88,8 @@ def tilt_to_rotations(tilt_angle, tilt_plane_rotation, rot3=0.0):
 
 
 def make_azimuthal_integrator(
-    center_xy,
+    center_xy=None,
+    poni_path=None,
     pixel1=PIXEL1,
     pixel2=PIXEL2,
     distance=DISTANCE,
@@ -121,6 +123,11 @@ def make_azimuthal_integrator(
     ai : AzimuthalIntegrator
         Configured pyFAI integrator.
     """
+
+    if poni_path is not None:
+        return pyFAI.load(str(poni_path))
+    if center_xy is None:
+        raise ValueError("center_xy is required when poni_path is not provided.")
     x_center, y_center = center_xy
 
     poni1 = y_center * pixel1
@@ -688,6 +695,7 @@ def _azimuthal_worker(
     tilt_plane_rotation,
     rot3,
     error_mode,
+    poni_path=None,
     use_custom_polarization=False,
     integration_function="integrate1d",
     correct_solid_angle=False,
@@ -754,6 +762,7 @@ def _azimuthal_worker(
     try:
         ai = make_azimuthal_integrator(
             center_xy=center_xy,
+            poni_path=poni_path,
             pixel1=pixel1,
             pixel2=pixel2,
             distance=distance,
@@ -860,7 +869,8 @@ def _azimuthal_worker(
 
 def azimuthal_average_pyfai(
     images,
-    centers_xy,
+    centers_xy=None,
+    poni_path=PONI_FILE,
     use_average_center=False,
     npt=N_POINTS,
     unit=UNIT,
@@ -895,8 +905,14 @@ def azimuthal_average_pyfai(
     ----------
     images : np.ndarray
         2D image or 3D image stack.
-    centers_xy : tuple or np.ndarray
-        Center(s) in (x, y) pixel coordinates.
+    centers_xy : tuple, np.ndarray, or None
+        Center(s) in (x, y) pixel coordinates. Required when poni_path is None.
+        When poni_path is provided and centers_xy is None, the center is read
+        from the PONI file automatically.
+    poni_path : path-like or None, optional
+        Path to a .poni file produced by pyFAI-calib2. When supplied the PONI
+        geometry (distance, wavelength, tilt, center) is used and the manual
+        detector parameters below are ignored. Defaults to PONI_FILE from globals.
     use_average_center : bool, optional
         If True and centers_xy are provided per-image, average them and use one
         center for all images.
@@ -953,6 +969,14 @@ def azimuthal_average_pyfai(
     image_stack, input_was_2d = _as_image_stack(images, name="images")
     n_images = image_stack.shape[0]
 
+    if poni_path is not None and centers_xy is None:
+        _ai_ref = pyFAI.load(str(poni_path))
+        cx = _ai_ref.poni2 / _ai_ref.pixel2
+        cy = _ai_ref.poni1 / _ai_ref.pixel1
+        centers_xy = np.array([cx, cy])
+    elif centers_xy is None:
+        raise ValueError("Either poni_path or centers_xy must be provided.")
+
     centers_used_xy = _normalize_centers_xy(
         centers_xy,
         n_images=n_images,
@@ -1004,6 +1028,7 @@ def azimuthal_average_pyfai(
                 tilt_plane_rotation=tilt_plane_rotation,
                 rot3=rot3,
                 error_mode=error_mode,
+                poni_path=poni_path,
                 use_custom_polarization=use_custom_polarization,
                 integration_function=integration_function,
                 correct_solid_angle=correct_solid_angle,
@@ -1034,6 +1059,7 @@ def azimuthal_average_pyfai(
         radial_out = np.full(npt, np.nan)
 
     geometry = {
+        "poni_path": str(poni_path) if poni_path is not None else None,
         "pixel1": pixel1,
         "pixel2": pixel2,
         "distance": distance,

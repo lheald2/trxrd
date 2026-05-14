@@ -1,4 +1,5 @@
 import re
+import configparser
 from pathlib import Path
 
 import numpy as np
@@ -32,13 +33,25 @@ FILENAME_PATTERNS = {
     ),
 }
 
-_GR_FILENAME_PATTERN = re.compile(
-    r"^(?P<sample_name>[A-Za-z0-9_]+)-"
-    r"(?P<fluence>[-+]?\d*\.?\d+)fs"
-    r"hw(?P<delay>[-+]?\d*\.?\d+(?:e[-+]?\d+)?)"
-    r"delay(?P<scan_number>\d+)\.gr$",
-    re.IGNORECASE,
-)
+GR_FILENAME_PATTERNS = {
+    "delay_scan": re.compile(
+        r"^(?P<sample_name>[A-Za-z0-9_]+)-"
+        r"(?P<fluence>[-+]?\d*\.?\d+)fs"
+        r"hw(?P<delay>[-+]?\d*\.?\d+(?:e[-+]?\d+)?)"
+        r"delay(?P<scan_number>\d+)\.gr$",
+        re.IGNORECASE,
+    ),
+    "theta_samz": re.compile(
+        r"^(?P<sample_name>[A-Za-z]+[A-Za-z0-9]*)"
+        r"(?P<scan_id>M\d+)_"
+        r"(?P<degree>[-+]?\d*\.?\d+)"
+        r"-deg_theta"
+        r"(?P<theta>[-+]?\d*\.?\d+)"
+        r"samz(?P<samz>\d+)_"
+        r"(?P<scan_number>\d+)\.gr$",
+        re.IGNORECASE,
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -149,22 +162,37 @@ def _get_counts(data_array, plot=False):
     return counts
 
 
-def _parse_gr_filename(file_name):
+def _parse_gr_filename(file_name, scheme="delay_scan"):
     """
-    Parse one .gr filename and extract sample_name, fluence, delay, and scan number.
+    Parse one .gr filename using a selected naming scheme.
     """
     name = Path(file_name).name
-    match = _GR_FILENAME_PATTERN.search(name)
+
+    if scheme not in GR_FILENAME_PATTERNS:
+        raise ValueError(
+            f"Unknown filename scheme '{scheme}'. "
+            f"Available schemes are: {list(GR_FILENAME_PATTERNS)}"
+        )
+
+    pattern = GR_FILENAME_PATTERNS[scheme]
+    match = pattern.search(name)
 
     if match is None:
-        raise ValueError(f"Could not parse filename: {name}")
+        raise ValueError(f"Could not parse .gr filename with scheme '{scheme}': {name}")
 
-    sample_name = match.group("sample_name")
-    fluence = float(match.group("fluence"))
-    delay = float(match.group("delay"))
-    scan_number = int(match.group("scan_number"))
+    parsed = match.groupdict()
 
-    return sample_name, fluence, delay, scan_number
+    for key in ["fluence", "delay", "theta", "degree"]:
+        if key in parsed and parsed[key] is not None:
+            parsed[key] = float(parsed[key])
+
+    for key in ["scan_number", "samz"]:
+        if key in parsed and parsed[key] is not None:
+            parsed[key] = int(parsed[key])
+
+    parsed["file_name"] = str(file_name)
+
+    return parsed
 
 
 def _read_gr_file(file_path, comment_chars=("#",)):
@@ -214,6 +242,64 @@ def _read_gr_file(file_path, comment_chars=("#",)):
 # Public functions
 # ---------------------------------------------------------------------------
 
+def read_tif_metadata(path):
+    """
+    Read a QXRD .metadata file and return its contents as a flat dict.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to either the .metadata file itself or the corresponding .tif file.
+        If a .tif path is given, the function looks for a sidecar file named
+        ``<stem>_meta.metadata`` in the same directory.
+
+    Returns
+    -------
+    dict
+        Flat dictionary with the following keys (all numeric values are float):
+
+        From [metadata] section
+          wavelength, distance, polarization, i00, exposure_time,
+          summed_exposures, image_number, width, height, date_string, timestamp
+
+        From [centerfinder] section
+          center_x, center_y, detector_distance, energy
+    """
+    path = Path(path)
+
+    if path.suffix.lower() in {".tif", ".tiff"}:
+        meta_path = path.with_name(path.stem + "_meta.metadata")
+    else:
+        meta_path = path
+
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Metadata file not found: {meta_path}")
+
+    config = configparser.ConfigParser()
+    config.read(meta_path)
+
+    m = config["metadata"]
+    c = config["centerfinder"]
+
+    return {
+        "wavelength":        float(m.get("Wavelength", "nan")),
+        "distance":          float(m.get("Distance", "nan")),
+        "polarization":      float(m.get("Polarization", "nan")),
+        "i00":               float(m.get("i00", "nan")),
+        "exposure_time":     float(m.get("exposureTime", "nan")),
+        "summed_exposures":  int(m.get("summedExposures", "0")),
+        "image_number":      int(m.get("imageNumber", "0")),
+        "width":             int(m.get("width", "0")),
+        "height":            int(m.get("height", "0")),
+        "date_string":       m.get("dateString", ""),
+        "timestamp":         float(m.get("timeStamp", "nan")),
+        "center_x":          float(c.get("centerX", "nan")),
+        "center_y":          float(c.get("centerY", "nan")),
+        "detector_distance": float(c.get("detectorDistance", "nan")),
+        "energy":            float(c.get("energy", "nan")),
+    }
+
+
 def get_image_details(
     folder_path,
     sample_name=None,
@@ -261,8 +347,8 @@ def get_image_details(
     if not folder.is_dir():
         raise ValueError(f"Path is not a directory: {folder}")
 
-    file_names = sorted(folder.glob(f"{SCAN_NAME}*.tif"))
-    print(f"{len(file_names)} TIFF files found in {folder} with scan name {SCAN_NAME}.")
+    file_names = sorted(folder.glob(f"{sample_name}*.tif"))
+    print(f"{len(file_names)} TIFF files found in {folder} with scan name {sample_name}.")
 
     if len(file_names) == 0:
         raise ValueError(f"No .tif files found in folder: {folder}")
@@ -635,17 +721,104 @@ def save_azimuthal_profiles_to_dat(
     return saved_files
 
 
+def get_grs_by_scan_name(
+    folder_path,
+    scan_name=None,
+    sort=True,
+    filter_data=False,
+    plot=False,
+    enforce_same_r=True,
+):
+    """
+    Load .gr files from a folder.
+
+    If scan_name is provided, only loads files starting with scan_name.
+    If scan_name is None, loads all .gr files in the folder.
+    """
+    folder = Path(folder_path)
+
+    if not folder.exists():
+        raise ValueError(f"Folder does not exist: {folder}")
+
+    if not folder.is_dir():
+        raise ValueError(f"Path is not a directory: {folder}")
+
+    if scan_name is None:
+        file_names = list(folder.glob("*.gr"))
+        print(f"{len(file_names)} .gr files found in {folder}.")
+    else:
+        file_names = list(folder.glob(f"{scan_name}*.gr"))
+        print(f"{len(file_names)} .gr files found in {folder} with scan name {scan_name}.")
+
+    if sort:
+        file_names = sorted(file_names)
+
+    if len(file_names) == 0:
+        if scan_name is None:
+            raise ValueError(f"No .gr files found in folder: {folder}")
+        else:
+            raise ValueError(f"No .gr files found for scan_name='{scan_name}' in {folder}")
+
+    if isinstance(filter_data, (list, tuple, np.ndarray)):
+        if len(filter_data) != 2:
+            raise ValueError("filter_data must be False or [min_index, max_index].")
+
+        min_val, max_val = filter_data
+
+        if min_val < 0 or max_val > len(file_names):
+            raise ValueError("filter_data range is out of bounds.")
+
+        file_names = file_names[min_val:max_val]
+
+    r_ref = None
+    gr_list = []
+
+    for file in file_names:
+        r, gr = _read_gr_file(file)
+
+        if r_ref is None:
+            r_ref = r
+        elif enforce_same_r:
+            if len(r) != len(r_ref) or not np.allclose(r, r_ref):
+                raise ValueError(
+                    f"r grid mismatch in file: {file}\n"
+                    "Set enforce_same_r=False if you want to handle this manually."
+                )
+
+        gr_list.append(gr)
+
+    grs = np.array(gr_list, dtype=float)
+
+    if plot:
+        plt.figure(figsize=FIGSIZE)
+        plt.plot(r_ref, grs[0])
+        plt.xlabel("r")
+        plt.ylabel("G(r)")
+        plt.title("First .gr file")
+        plt.tight_layout()
+        plt.show()
+
+    return {
+        "r": r_ref,
+        "grs": grs,
+        "file_names": np.array([str(f) for f in file_names], dtype=str),
+    }
+
+
 def get_gr_details(
     folder_path,
     sample_name=None,
+    filename_scheme="delay_scan",
     sort=True,
+    sort_key="scan_number",
     filter_data=False,
     delay_sign=1,
     plot=False,
     enforce_same_r=True,
 ):
     """
-    Read .gr files from a folder and extract filename metadata using regex.
+    Read .gr files from a folder and extract filename metadata using a
+    flexible filename parser.
 
     Parameters
     ----------
@@ -654,29 +827,27 @@ def get_gr_details(
     sample_name : str or None, optional
         If provided, only keep files whose parsed sample_name matches this
         value (case-insensitive).
+    filename_scheme : str
+        Key from GR_FILENAME_PATTERNS, e.g. "delay_scan" or "theta_samz".
     sort : bool, optional
-        If True, sort data by scan_number.
+        If True, sort by sort_key if available.
+    sort_key : str
+        Metadata field to sort by. Usually "scan_number", "delay", or "theta".
     filter_data : bool or list-like, optional
         If False, use all data.
         If list-like [min_index, max_index], keep only that slice after sorting.
     delay_sign : int or float, optional
         Multiply parsed delay values by this factor.
     plot : bool, optional
-        If True, plot the first G(r) and all delays.
+        If True, plot the first G(r).
     enforce_same_r : bool, optional
         If True, require all files to have the same r grid.
 
     Returns
     -------
     dict
-        Dictionary containing:
-        - "r"           : np.ndarray  (Nr,)
-        - "grs"         : np.ndarray  (Nfiles, Nr)
-        - "sample_name" : np.ndarray  (Nfiles,)
-        - "fluence"     : np.ndarray  (Nfiles,)
-        - "delay"       : np.ndarray  (Nfiles,)
-        - "scan_number" : np.ndarray  (Nfiles,)
-        - "file_names"  : np.ndarray  (Nfiles,)
+        Dictionary containing "r", "grs", "file_names", and all parsed
+        metadata fields for the selected filename_scheme.
     """
     folder = Path(folder_path)
 
@@ -692,50 +863,58 @@ def get_gr_details(
     if len(file_names) == 0:
         raise ValueError(f"No .gr files found in folder: {folder}")
 
-    sample_names = []
-    fluence = []
-    delay = []
-    scan_number = []
+    metadata = []
     cleaned_files = []
 
     for file_name in file_names:
         try:
-            s_val, f_val, d_val, i_val = _parse_gr_filename(file_name)
+            meta = _parse_gr_filename(file_name, scheme=filename_scheme)
         except ValueError:
             continue
 
-        if sample_name is not None and s_val.lower() != sample_name.lower():
-            continue
+        if sample_name is not None:
+            parsed_sample = meta.get("sample_name", "")
+            if parsed_sample.lower() != sample_name.lower():
+                continue
 
-        sample_names.append(s_val)
-        fluence.append(f_val)
-        delay.append(d_val)
-        scan_number.append(i_val)
+        metadata.append(meta)
         cleaned_files.append(str(file_name))
 
     if len(cleaned_files) == 0:
-        if sample_name is None:
-            raise ValueError(
-                "No .gr files in the folder matched the expected filename pattern."
-            )
-        else:
-            raise ValueError(
-                f"No .gr files found for sample_name='{sample_name}' "
-                f"that matched the expected filename pattern."
-            )
+        raise ValueError(
+            f"No .gr files matched filename_scheme='{filename_scheme}'"
+            + (f" and sample_name='{sample_name}'." if sample_name is not None else ".")
+        )
 
-    sample_names = np.array(sample_names, dtype=str)
-    fluence = np.array(fluence, dtype=float)
-    delay = delay_sign * np.array(delay, dtype=float)
-    scan_number = np.array(scan_number, dtype=int)
+    meta_arrays = {}
+    all_keys = set()
+    for meta in metadata:
+        all_keys.update(meta.keys())
+
+    for key in all_keys:
+        values = [meta.get(key, np.nan) for meta in metadata]
+
+        if key in ["sample_name", "file_name", "scan_id"]:
+            meta_arrays[key] = np.array(values, dtype=str)
+        else:
+            meta_arrays[key] = np.array(values)
+
     cleaned_files = np.array(cleaned_files, dtype=str)
 
+    if "delay" in meta_arrays:
+        meta_arrays["delay"] = delay_sign * meta_arrays["delay"].astype(float)
+
     if sort:
-        idx_sort = np.argsort(scan_number)
-        sample_names = sample_names[idx_sort]
-        fluence = fluence[idx_sort]
-        delay = delay[idx_sort]
-        scan_number = scan_number[idx_sort]
+        if sort_key in meta_arrays:
+            idx_sort = np.argsort(meta_arrays[sort_key])
+        elif "scan_number" in meta_arrays:
+            idx_sort = np.argsort(meta_arrays["scan_number"])
+        else:
+            idx_sort = np.arange(len(cleaned_files))
+
+        for key in meta_arrays:
+            meta_arrays[key] = meta_arrays[key][idx_sort]
+
         cleaned_files = cleaned_files[idx_sort]
 
     if isinstance(filter_data, (list, tuple, np.ndarray)):
@@ -747,11 +926,10 @@ def get_gr_details(
         if min_val < 0 or max_val > len(cleaned_files):
             raise ValueError("filter_data range is out of bounds.")
 
-        sample_names = sample_names[min_val:max_val]
+        for key in meta_arrays:
+            meta_arrays[key] = meta_arrays[key][min_val:max_val]
+
         cleaned_files = cleaned_files[min_val:max_val]
-        fluence = fluence[min_val:max_val]
-        delay = delay[min_val:max_val]
-        scan_number = scan_number[min_val:max_val]
 
     r_ref = None
     gr_list = []
@@ -781,12 +959,11 @@ def get_gr_details(
         plt.tight_layout()
         plt.show()
 
-    return {
+    data_dict = {
         "r": r_ref,
         "grs": grs,
-        "sample_name": sample_names,
-        "fluence": fluence,
-        "delay": delay,
-        "scan_number": scan_number,
         "file_names": cleaned_files,
     }
+    data_dict.update(meta_arrays)
+
+    return data_dict
