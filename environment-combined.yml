@@ -1,0 +1,68 @@
+name: pdf_analysis
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+
+  # Core scientific
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+
+  # Data I/O and HDF5
+  - h5py
+
+  # PDF analysis — diffpy suite
+  - diffpy.cmi          # pulls in srfit, srreal, structure, utils, pdffit2
+  - diffpy.pdfgui
+  - diffpy.morph
+  - wxpython            # required by pdfgui
+  - pyobjcryst
+  - periodictable
+  - xraydb
+
+  # Crystallography and materials
+  - pymatgen
+  - spglib
+  - sympy
+  - networkx
+  - uncertainties
+
+  # Notebooks and visualization
+  - ipykernel
+  - ipython
+  - plotly
+  - tqdm
+  - lxml
+
+  # Bibliography
+  - bibtexparser
+
+  # Parallel computing
+  - mpi4py
+
+  - pip
+  - pip:
+      # X-ray data processing (pip-only or more up-to-date via pip)
+      - pyfai
+      - fabio
+      - tifffile
+      - silx
+      - hdf5plugin
+      - pyopencl
+      - pytools
+
+      # Interactive widgets
+      - ipympl
+      - ipywidgets
+      - jupyterlab-widgets
+      - widgetsnbextension
+
+      # Utilities
+      - numexpr
+      - openpyxl
+      - bg-mpl-stylesheets
+
+      # PDFgetX3 must be installed separately — see README

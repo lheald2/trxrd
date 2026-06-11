@@ -13,9 +13,9 @@ from diffpy.pdfgetx import PDFGetter
 # ============================================================
 # Paths and scan identification
 # ============================================================
-DAT_PATH   = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\CeO2\low_keV")
-SCAN_NAME  = "CeO2_good"   # filename prefix; set None to load all .dat files
-SAVE_PATH  = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\CeO2\low_keV\output_10cutoff")
+DAT_PATH   = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Ksurv2")  # Path to directory containing .dat files
+SCAN_NAME  = "BTO400nmS3_285Ksurv2"   # filename prefix; set None to load all .dat files
+SAVE_PATH  = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Ksurv2\output")  # Path to directory where output files will be saved
 
 # Optional: path to a pdfgetx3.cfg file produced by PDFgetX3.
 # When provided, all PDF parameters below are ignored.
@@ -24,12 +24,12 @@ CFG_FILE   = None   # e.g. Path("pdfgetx3.cfg")
 # ============================================================
 # PDF calculation parameters (used only when CFG_FILE is None)
 # ============================================================
-COMPOSITION = "CeO2"
-WAVELENGTH  = 0.4065  # Å, X-ray wavelength
+COMPOSITION = "BaTiO3"
+WAVELENGTH  = 0.399  # Å, X-ray wavelength
 MODE        = "xray"   # "xray" or "neutron"
 DATAFORMAT  = "QA"   # input data format: "QA" (Å⁻¹), "Qnm" (nm⁻¹), "twotheta", "d"
 Q_MIN       = 0.35     # Å⁻¹, lower Q cutoff
-Q_MAX       = 10.0     # Å⁻¹, upper Q cutoff for PDF transform
+Q_MAX       = 12.0     # Å⁻¹, upper Q cutoff for PDF transform
 QMAXINST    = 17.0     # Å⁻¹, instrument Qmax (sets upper physical limit before cutoff)
 R_MIN       = 0.0      # Å, lower r limit
 R_MAX       = 30.0     # Å, upper r limit
@@ -41,8 +41,8 @@ OUTPUTTYPES = ["gr"]   # any subset of ["gr", "fq", "sq", "iq"]
 # ============================================================
 # Background subtraction (optional)
 # ============================================================
-BGFILE  = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\CeO2\low_keV\CeO2_background.dat")   # Path to background .dat file, or None
-BGSCALE = 0.45    # scale factor applied to background before subtraction
+BGFILE  = f"{DAT_PATH}/BaTiO3_background.dat"   # Path to background .dat file, or None
+BGSCALE = 0.85  # scale factor applied to background before subtraction
 
 # ============================================================
 # Helper: read a .dat file, skipping non-numeric lines

@@ -17,17 +17,20 @@ import numpy as np
 import trxrd
 
 # Experimental Parameters and Defaults
+
 # ============================================================
 # Data and Mask Paths, Scan Name, and Filename Pattern
 # ============================================================
 DATA_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BTO400_S3") # Path to directory containing TIFF files
 MASK_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\TRXRDPython\testdata\mask_2021_dec.tif") # Path to mask file
-SCAN_NAME = "BTO400nmS3_360Kre4" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
+SCAN_NAME = "BTO400nmS3_285Ksurv2" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
 SCAN_TYPE = "delay_scan" # Type of scan based on filename pattern, e.g. "delay_scan", "theta_samz", etc. Must correspond to a key in the "filename_patterns" dictionary in trxrd.py
-BACKGROUND_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BlankSubstratePinkBeam\blanksubstratePinkBeam285K-1.0fshw-4e-09delay00004_045.tif")
-SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO400nmS3_360Kre4") # Path to directory where processed data will be saved, e.g. as .h5 file
+BACKGROUND_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BlankSubstratePinkBeam\blanksubstratePinkBeam-1.0fshw-4e-09delay00004_020.tif")
+SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Ksurv2") # Path to directory where processed data will be saved, e.g. as .h5 file
+# PONI file from pyFAI-calib2. Set to a Path to use PONI geometry;
+# set to None to use the manual parameters below.
+PONI_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\CeO2\poni_files\CeO2_calib_poni.poni") # Path to .poni file, or None
 
-# ============================================================
 # General Defaults
 # ============================================================
 FIGSIZE = (10, 4)
@@ -40,7 +43,7 @@ DELAY_SIGN = -1 # Check file naming scheme, sometimes positives delays have "-" 
 # ============================================================
 MASK_CENTER_X = 52
 MASK_CENTER_Y = 1667
-MASK_RADIUS = 30
+MASK_RADIUS = 20
 
 # ============================================================
 # Center Guess and Sampling Defaults
@@ -52,9 +55,8 @@ DOWNSAMPLE = 2 # Downsample factor for center finding, e.g. 2 means use every ot
 # ============================================================
 # Detector Parameters and Defaults
 # ============================================================
-# PONI file from pyFAI-calib2. Set to a Path to use PONI geometry;
-# set to None to use the manual parameters below.
-PONI_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\CeO2\low_keV\CeO2_poni.poni")                # Path to .poni file, or None
+
+#PONI_FILE = None
 # Detector and beam parameters
 PIXEL1 = 1.72e-4                 # m, detector pixel size along rows (y)
 PIXEL2 = 1.72e-4                 # m, detector pixel size along cols (x)
@@ -77,23 +79,44 @@ FLAT = None                     # 2D flat-field image or None
 UNIT = "q_A^-1" # Unit for x-axis of azimuthally averaged data, e.g. "q_A^-1" for inverse Angstroms, "2theta_deg" for degrees, etc. 
 NAN_MIN = 0.35 # Minimum value for valid data, values below this will be set to NaN, e.g. 0.35 or None for no minimum threshold
 NAN_MAX = None # Maximum value for valid data, values above this will be set to NaN, e.g. 1.0 or None for no maximum threshold
-NORM_MIN = 1.25 # Minimum value for normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
-NORM_MAX = 1.50 # Maximum value for normalization, values above this will be set to this value before normalization, e.g. 1.0 or None for no maximum threshold
+NORM_MIN = 4.05 # Minimum value for normalization, values below this will be set to this value before normalization, e.g. 0.5 or None for no minimum threshold
+NORM_MAX = 4.25 # Maximum value for normalization, values above this will be set to this value before normalization, e.g. 1.0 or None for no maximum threshold
 N_POINTS = 3000 # Number of points for azimuthal averaging, e.g. 3000 or None to use all pixels
 
+# if META_PATH is not None:
+#     metadata = trxrd.read_tif_metadata(META_PATH)
+#     #print(metadata.keys())
+#     CENTER_X = metadata["center_x"]
+#     MASK_CENTER_X = metadata["center_x"]
+#     CENTER_Y = metadata["center_y"]
+#     MASK_CENTER_Y = metadata["center_y"]
+#     DISTANCE = metadata["distance"]
+#     WAVELENGTH = metadata["wavelength"]
+#     POLARIZATION_FACTOR = metadata["polarization"]
+#     PIXEL1 = 1.50e-4
+#     PIXEL2 = 1.50e-4
 
-
-# Check number of files in folder 
-file_names = sorted(DATA_PATH.glob(f"{SCAN_NAME}*.tif"))
-print(f"{len(file_names)} TIFF files found in {DATA_PATH}.")
+# # Check number of files in folder 
+# file_names = sorted(DATA_PATH.glob(f"{SCAN_NAME}*.tif"))
+# print(f"{len(file_names)} TIFF files found in {DATA_PATH}.")
 
 
 # ------------------------------------------------------------
 # Load data
 # ------------------------------------------------------------
-data_dict = trxrd.get_images_by_scan_name(
+# data_dict = trxrd.get_images_by_scan_name(
+#     folder_path=DATA_PATH,
+#     scan_name=SCAN_NAME,
+#     sort=True,
+#     filter_data=False,
+#     plot=False,
+# )
+
+data_dict = trxrd.get_image_details(
     folder_path=DATA_PATH,
-    scan_name=SCAN_NAME,
+    sample_name=SCAN_NAME,
+    filename_scheme="delay_scan",
+    sort_key="image_number",
     sort=True,
     filter_data=False,
     plot=False,
@@ -119,6 +142,7 @@ combined_mask = trxrd.build_combined_mask(
 # Compute azimuthal average
 # ------------------------------------------------------------
 if PONI_FILE is not None:
+    print(f"Using PONI geometry from: {PONI_FILE}")
     az_result = trxrd.azimuthal_average_pyfai(
         images=data_dict["images"],
         poni_path=PONI_FILE,
@@ -135,13 +159,10 @@ if PONI_FILE is not None:
         method=("bbox", "csr", "cython")
     )
 else:
-    az_result = trxrd.azimuthal_average_manual(
+    az_result = trxrd.azimuthal_average_pyfai(
         images=data_dict["images"],
-        center_xy=(CENTER_X, CENTER_Y),
-        pixel_size=(PIXEL1, PIXEL2),
-        distance=DISTANCE,
-        wavelength=WAVELENGTH,
-        tilt_angles=(TILT_ANGLE, TILT_PLANE_ROTATION, ROT3),
+        centers_xy=(CENTER_X, CENTER_Y),   # note: (x, y)
+        polarization_factor=POLARIZATION_FACTOR,
         npt=N_POINTS,
         unit=UNIT,
         nan_radial_range=(NAN_MIN, NAN_MAX),   # set Q < 0.3 to NaN
@@ -149,9 +170,10 @@ else:
         integration_mask=combined_mask,
         return_dict=True,
         progress_interval=100,
-        polarization_factor=POLARIZATION_FACTOR,
-        dark=DARK,
-        flat=FLAT,
+        use_custom_polarization=False,
+        integration_function="integrate1d",
+        correct_solid_angle=False,
+        method=("bbox", "csr", "cython")
     )
 
 q = az_result["radial"]
@@ -174,6 +196,28 @@ norm_result = trxrd.normalize_profiles_to_range(
 
 profiles_norm = norm_result["normalized_profiles"]
 
+# ------------------------------------------------------------
+# Apply q drift correction
+# ------------------------------------------------------------
+# results = trxrd.track_peaks(
+#     q, profiles.T,
+#     ref="mean",          # average pattern is more robust than image 0
+#     prominence=150,      # <-- tune this; main knob for detection
+#     distance=1,          # min samples between peaks
+# )
+
+# s = trxrd.scale_drift_factor(results)
+# # Step 2: apply correction
+# q_corr, I_corr = trxrd.apply_scale_correction(q, profiles.T, s, kind="cubic")
+
+# # Step 3: verify by re-running peak tracking on corrected data
+# results_corr, summary = trxrd.verify_correction(
+#     q_corr, I_corr, results,
+#     track_peaks_fn=trxrd.track_peaks,
+#     prominence=150,    # same as your original call
+# )
+# profiles_norm = I_corr.T
+# q = q_corr
 
 # ------------------------------------------------------------
 # Save profiles as .dat files

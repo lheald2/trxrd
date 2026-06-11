@@ -456,7 +456,7 @@ def subtract_scaled_background_profile(
     if plot_scale_factors:
         plt.figure(figsize=figsize)
         plt.plot(np.arange(len(scale_factors)), scale_factors, lw=1.5)
-        plt.axhline(1.0, color="k", linestyle="--", alpha=0.6)
+        # plt.axhline(1.0, color="k", linestyle="--", alpha=0.6)
         plt.xlabel("Profile Index")
         plt.ylabel("Background Scale Factor")
         plt.title("Background Scale Factor vs Profile Index")

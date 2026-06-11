@@ -8,6 +8,7 @@ from trxrd.io import (
     load_background,
     save_azimuthal_profiles_to_dat,
     get_gr_details,
+    get_dat_details,
     get_grs_by_scan_name,
     read_tif_metadata,
 )
@@ -70,4 +71,17 @@ from trxrd.analysis import (
     make_reference_gr,
     compute_delta_grs,
     average_delta_grs_by_delay,
+    average_grs_by_temperature,
+    average_iqs_by_temperature,
+    svd_analysis,
+    gaussian,
+    detect_peaks,
+    fit_one_peak,
+    track_peaks,
+    plot_drift,
+    plot_diagnostics,
+    scale_drift_factor, 
+    apply_scale_correction, 
+    verify_correction
+
 )

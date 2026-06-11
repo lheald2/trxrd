@@ -19,6 +19,12 @@ build_reference      -- average pre-t0 .gr files and full-fit them
 fit_dgr              -- single ΔG(r) fit
 fit_dgr_batch        -- batch ΔG(r) fits against a Reference
 
+Multi-phase fitting:
+PhaseConfig             -- per-phase configuration (CIF, space group, initial params)
+MultiPhaseFitConfig     -- multi-phase config (list of phases + shared instrumental)
+fit_one_multiphase      -- fit a single .gr file with multiple phases
+fit_batch_multiphase    -- batch multi-phase fits using the full/reduced strategy
+
 Example (notebook)
 ------------------
 from diffpy_fitting import FitConfig, fit_one, fit_batch, results_to_dataframe, plot_series
@@ -86,6 +92,60 @@ _DEFAULT_PINNED = ["Delta2", "Calib_Qdamp", "Calib_Qbroad"]
 
 
 # ============================================================
+# Phase configuration (for multi-phase fits)
+# ============================================================
+
+@dataclass
+class PhaseConfig:
+    """
+    Configuration for a single phase in a multi-phase PDF fit.
+
+    Parameters
+    ----------
+    cif_path : str or Path
+        Path to the structure CIF file for this phase.
+    space_group : str
+        Space group symbol passed to constrainAsSpaceGroup.
+    name : str, optional
+        Human-readable label used as a prefix for all recipe parameter names
+        (e.g. 'cubic_a', 'tet_c'). Defaults to the CIF file stem.
+    scale_i : float
+        Initial scale factor for this phase.
+    uiso_i : float
+        Initial isotropic ADP (Å²) for all sites.
+    delta2_i : float
+        Initial delta2 correlated-motion parameter.
+    fixed_params : dict
+        Parameters held fixed throughout all fit stages, keyed by prefixed name
+        (e.g. {'cubic_ADP_Uiso_0': 0.005}).
+    param_bounds : dict
+        Per-phase bound overrides; take precedence over MultiPhaseFitConfig.param_bounds.
+        Keys are bare (un-prefixed) parameter names.
+    element_uiso : dict, optional
+        Group all ADP components for each element into a single shared Uiso.
+        Keys are element symbols (e.g. 'Ba', 'Ti', 'O').
+        Values: None = fit freely; float = fix to that value.
+        The recipe variable is named '<phase>_Uiso_<element>' (e.g. 'tet_Uiso_O').
+        Elements not listed use per-component ADP behavior.
+        Example: {'Ba': None, 'Ti': None, 'O': 0.006}
+    """
+    cif_path:     Union[str, Path]
+    space_group:  str
+    name:         str   = ""
+    scale_i:      float = 0.5
+    uiso_i:       float = 0.005
+    delta2_i:     float = 1.7
+    fixed_params: Dict  = field(default_factory=dict)
+    param_bounds: Dict  = field(default_factory=dict)
+    element_uiso: Dict  = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.cif_path = Path(self.cif_path)
+        if not self.name:
+            self.name = self.cif_path.stem
+
+
+# ============================================================
 # Configuration
 # ============================================================
 
@@ -109,10 +169,22 @@ class FitConfig:
     fix_qdamp, fix_qbroad : bool
         Pin instrumental parameters even in full-mode fits (e.g. if
         pre-calibrated). In reduced mode they are always pinned regardless.
+    fixed_params : dict
+        Parameters to hold fixed at a specific value throughout all fit stages.
+        Keys are parameter names (e.g. 'ADP_Uiso_0', 'Delta2'); values are the
+        pinned floats. ADP parameters in this dict are tagged 'adp_fixed'
+        instead of 'adp', so recipe.free("adp") never touches them.
+    element_uiso : dict, optional
+        Group all ADP components for each element into a single shared Uiso.
+        Keys are element symbols (e.g. 'Ba', 'Ti', 'O').
+        Values: None = fit freely; float = fix to that value.
+        The recipe variable is named 'Uiso_<element>' (e.g. 'Uiso_O').
+        Elements not listed use per-component ADP behavior.
+        Example: {'Ba': None, 'Ti': None, 'O': 0.006}
     param_bounds : dict
         Bounds for least_squares (method='trf'). Keys are parameter names;
-        '_adp_default' applies to any parameter whose name starts with 'ADP_'.
-        Format: {name: (lower, upper)}, use None for one-sided unbounded.
+        '_adp_default' applies to any parameter whose name starts with 'ADP_'
+        or 'Uiso_'. Format: {name: (lower, upper)}, use None for one-sided unbounded.
     pinned_in_reduced : list of str
         Parameters held fixed in reduced-mode fits (seeded from reference avg).
     save_outputs : bool
@@ -143,6 +215,8 @@ class FitConfig:
     fix_qdamp:  bool = False
     fix_qbroad: bool = False
 
+    fixed_params:      Dict         = field(default_factory=dict)
+    element_uiso:      Dict         = field(default_factory=dict)
     param_bounds:      Dict         = field(default_factory=lambda: dict(_DEFAULT_PARAM_BOUNDS))
     pinned_in_reduced: List[str]    = field(default_factory=lambda: list(_DEFAULT_PINNED))
 
@@ -155,6 +229,72 @@ class FitConfig:
 
     def __post_init__(self):
         self.cif_path = Path(self.cif_path)
+
+
+@dataclass
+class MultiPhaseFitConfig:
+    """
+    Configuration for a multi-phase PDF fitting run.
+
+    Qdamp and Qbroad are shared across all phases via srfit constraints.
+    All structural parameters are independent per phase and prefixed with
+    the phase name (e.g. 'cubic_a', 'tet_c', 'tet_ADP_U11_0', 'tet_Delta2').
+
+    Parameters
+    ----------
+    phases : list of PhaseConfig
+        One entry per phase; order determines generator numbering (G1, G2, …).
+    rmin, rmax, rstep : float
+        r-range for the PDF fit (Angstroms).
+    qmax, qmin : float
+        Q-range used in the PDF calculation (Angstroms^-1).
+    qdamp_i, qbroad_i : float
+        Initial values for the shared instrumental parameters.
+    fix_qdamp, fix_qbroad : bool
+        Pin instrumental parameters even in full-mode fits.
+    param_bounds : dict
+        Global parameter bounds (same format as FitConfig.param_bounds).
+        PhaseConfig.param_bounds entries override these on a per-phase basis.
+    pinned_in_reduced : list of str or None
+        Parameters held fixed in reduced-mode fits. When None (default),
+        auto-set to all per-phase Delta2 values plus Calib_Qdamp/Qbroad.
+    save_outputs, resdir, fitdir, figdir, run_parallel : same as FitConfig.
+    """
+    phases: List[PhaseConfig]
+
+    rmin:  float = 10.0
+    rmax:  float = 30.0
+    rstep: float = 0.01
+    qmax:  float = 12.0
+    qmin:  float = 0.3
+
+    qdamp_i:  float = 0.04
+    qbroad_i: float = 0.02
+
+    fix_qdamp:  bool = False
+    fix_qbroad: bool = False
+
+    param_bounds:      Dict                = field(default_factory=lambda: dict(_DEFAULT_PARAM_BOUNDS))
+    pinned_in_reduced: Optional[List[str]] = None
+
+    save_outputs: bool          = True
+    resdir:       Optional[Path] = None
+    fitdir:       Optional[Path] = None
+    figdir:       Optional[Path] = None
+
+    run_parallel: bool = True
+
+    def __post_init__(self):
+        for phase in self.phases:
+            if isinstance(phase.cif_path, str):
+                phase.cif_path = Path(phase.cif_path)
+            if not phase.name:
+                phase.name = phase.cif_path.stem
+        if self.pinned_in_reduced is None:
+            self.pinned_in_reduced = (
+                [f"{p.name}_Delta2" for p in self.phases]
+                + ["Calib_Qdamp", "Calib_Qbroad"]
+            )
 
 
 # ============================================================
@@ -178,12 +318,16 @@ class FitResult:
         The .gr file that was fit.
     recipe : FitRecipe
         The fitted recipe object, kept for advanced inspection.
+    timestamp : float or None
+        Time value (ns) parsed from the filename (format: Name_time_gr.gr).
+        None when the filename does not follow the convention.
     """
-    params:   Dict
-    rw:       float
-    mode:     str
-    gr_path:  Path
-    recipe:   FitRecipe
+    params:    Dict
+    rw:        float
+    mode:      str
+    gr_path:   Path
+    recipe:    FitRecipe
+    timestamp: Optional[float] = None
 
     def plot(self, show: bool = True) -> "plt.Figure":
         """Plot the fitted PDF with residual. Returns the Figure."""
@@ -192,9 +336,13 @@ class FitResult:
         return _plot_fit(self.recipe, show=show)
 
     def to_dict(self) -> Dict:
-        """Flat dict with file, rw, mode, and all parameters — one CSV row."""
-        return {"file": self.gr_path.name, "rw": self.rw, "mode": self.mode,
-                **self.params}
+        """Flat dict with file, timestamp, rw, mode, and all parameters — one CSV row."""
+        d = {"file": self.gr_path.name}
+        if self.timestamp is not None:
+            d["timestamp"] = self.timestamp
+        d.update({"rw": self.rw, "mode": self.mode})
+        d.update(self.params)
+        return d
 
 
 # ============================================================
@@ -332,6 +480,8 @@ def fit_batch(
     if not files:
         raise FileNotFoundError(f"No .gr files found for: {gr_paths!r}")
 
+    files = _sort_by_timestamp(files)
+
     full_set = normalize_full_indices(full_indices, len(files))
     if not full_set:
         raise ValueError("full_indices produced no full-mode files; at least one is required.")
@@ -349,9 +499,11 @@ def fit_batch(
         print(f"  [{idx}/{len(files)}] {gr_path.name}...", end=" ", flush=True)
         try:
             result = fit_one(gr_path, config, mode="full", initial_params=params, verbose=False)
+            result.timestamp = _parse_timestamp(gr_path)
             params = result.params
             full_results.append(result)
-            print(f"Rw = {result.rw:.4f}")
+            ts_str = f"  t={result.timestamp} ns" if result.timestamp is not None else ""
+            print(f"Rw = {result.rw:.4f}{ts_str}")
         except Exception as e:
             print(f"FAILED: {e}")
 
@@ -383,13 +535,195 @@ def fit_batch(
                                  initial_params=params,
                                  reference_params=reference_params,
                                  verbose=False)
+                result.timestamp = _parse_timestamp(gr_path)
                 params = result.params
                 reduced_results.append(result)
-                print(f"Rw = {result.rw:.4f}")
+                ts_str = f"  t={result.timestamp} ns" if result.timestamp is not None else ""
+                print(f"Rw = {result.rw:.4f}{ts_str}")
             except Exception as e:
                 print(f"FAILED: {e}")
 
     # Merge and restore original file order
+    indexed = (
+        [(i, r) for (i, _), r in zip(full_files,    full_results)]    +
+        [(i, r) for (i, _), r in zip(reduced_files, reduced_results)]
+    )
+    indexed.sort(key=lambda x: x[0])
+    return [r for _, r in indexed]
+
+
+# ============================================================
+# Multi-phase fitting API
+# ============================================================
+
+def fit_one_multiphase(
+    gr_path: Union[str, Path],
+    config: MultiPhaseFitConfig,
+    mode: str = "full",
+    initial_params: Optional[Dict] = None,
+    reference_params: Optional[Dict] = None,
+    verbose: bool = True,
+) -> FitResult:
+    """
+    Fit a single .gr file against multiple structural phases.
+
+    One PDFGenerator is created per phase; the contribution equation is
+    's1_ph1*G1 + s1_ph2*G2 + …'. Qdamp and Qbroad are shared across all
+    generators via srfit constraints. All per-phase parameters are prefixed
+    with the phase name (e.g. 'cubic_a', 'tet_c', 'tet_ADP_U11_0').
+
+    Parameters
+    ----------
+    gr_path : str or Path
+    config : MultiPhaseFitConfig
+    mode : {'full', 'reduced'}
+        'full'    — staged refinement: scale → lat → ADPs → Delta2 → inst.
+        'reduced' — refines only scale, lattice, and ADPs; pins Delta2 and
+                    instrumental params to reference_params values.
+    initial_params : dict, optional
+        Warm-start values (with phase-prefixed keys). Falls back to per-phase
+        defaults for missing keys.
+    reference_params : dict, optional
+        Required when mode='reduced'.
+    verbose : bool
+
+    Returns
+    -------
+    FitResult
+        params keys are phase-prefixed (e.g. 'cubic_a', 'tet_Delta2').
+    """
+    gr_path = Path(gr_path)
+    if initial_params is None:
+        initial_params = {}
+
+    if verbose:
+        phase_names = ", ".join(p.name for p in config.phases)
+        print(f"Fitting {gr_path.name} [{mode}] — phases: {phase_names}")
+
+    if mode == "reduced":
+        if reference_params is None:
+            raise ValueError("reduced mode requires reference_params")
+        seed = dict(initial_params)
+        for pname in config.pinned_in_reduced:
+            if pname in reference_params:
+                seed[pname] = reference_params[pname]
+        recipe = _make_multiphase_recipe(config, gr_path, seed, fix_instrumental=True)
+        recipe.fithooks[0].verbose = 0
+        _fit_reduced(recipe, config, verbose=verbose)
+    elif mode == "full":
+        recipe = _make_multiphase_recipe(config, gr_path, initial_params)
+        recipe.fithooks[0].verbose = 0
+        _fit_full(recipe, config, verbose=verbose)
+    else:
+        raise ValueError(f"Unknown mode: {mode!r}")
+
+    res = FitResults(recipe)
+
+    if config.save_outputs:
+        _save_fit_outputs(recipe, res, gr_path, config)
+
+    params = {name: recipe.get(name).value
+              for name in recipe._parameters.keys()}
+
+    return FitResult(params=params, rw=res.rw, mode=mode,
+                     gr_path=gr_path, recipe=recipe)
+
+
+def fit_batch_multiphase(
+    gr_paths: Union[str, Path, List[Union[str, Path]]],
+    config: MultiPhaseFitConfig,
+    full_indices: Union[Tuple, List] = (1, 1),
+    save_reference: bool = True,
+) -> List[FitResult]:
+    """
+    Batch multi-phase PDF fit using the two-pass full/reduced strategy.
+
+    Identical logic to fit_batch, but uses MultiPhaseFitConfig and
+    fit_one_multiphase. Pass-1 files get a full staged refinement; all
+    remaining files use reduced mode (only scale, lat, ADPs refined).
+
+    Parameters
+    ----------
+    gr_paths : str, Path, or list
+        Glob pattern, directory, or explicit list of .gr files.
+    config : MultiPhaseFitConfig
+    full_indices : tuple or list
+        Which sorted file indices (1-based) get full-mode refinement.
+    save_reference : bool
+        Write averaged reference params to JSON when save_outputs=True.
+
+    Returns
+    -------
+    list of FitResult, sorted by original file index.
+    """
+    files = _resolve_gr_paths(gr_paths)
+    if not files:
+        raise FileNotFoundError(f"No .gr files found for: {gr_paths!r}")
+
+    files = _sort_by_timestamp(files)
+    full_set = normalize_full_indices(full_indices, len(files))
+    if not full_set:
+        raise ValueError("full_indices produced no full-mode files; at least one is required.")
+
+    full_files    = [(i, p) for i, p in enumerate(files, 1) if i in full_set]
+    reduced_files = [(i, p) for i, p in enumerate(files, 1) if i not in full_set]
+
+    phase_names = ", ".join(p.name for p in config.phases)
+    print(f"Multi-phase fit — phases: {phase_names}")
+    print(f"Found {len(files)} file(s): {len(full_files)} full, {len(reduced_files)} reduced.")
+
+    # ---- Pass 1: full fits ----
+    print("\n=== Pass 1: Full-mode refinements ===")
+    full_results: List[FitResult] = []
+    params: Dict = {}
+    for idx, gr_path in full_files:
+        print(f"  [{idx}/{len(files)}] {gr_path.name}...", end=" ", flush=True)
+        try:
+            result = fit_one_multiphase(gr_path, config, mode="full",
+                                        initial_params=params, verbose=False)
+            result.timestamp = _parse_timestamp(gr_path)
+            params = result.params
+            full_results.append(result)
+            ts_str = f"  t={result.timestamp} ns" if result.timestamp is not None else ""
+            print(f"Rw = {result.rw:.4f}{ts_str}")
+        except Exception as e:
+            print(f"FAILED: {e}")
+
+    if not full_results:
+        raise RuntimeError("No full-mode fits succeeded; cannot build reference.")
+
+    reference_params = average_reference_params([r.to_dict() for r in full_results])
+
+    if save_reference and config.save_outputs:
+        ref_dir = Path(config.resdir) if config.resdir else full_files[0][1].parent / "res"
+        ref_dir.mkdir(exist_ok=True)
+        save_reference_params(reference_params, ref_dir / "reference_params_multiphase.json")
+
+    print("\nReference values (averaged over full fits):")
+    for k in config.pinned_in_reduced:
+        if k in reference_params:
+            print(f"  {k:24s} = {reference_params[k]:.6f}")
+
+    # ---- Pass 2: reduced fits ----
+    reduced_results: List[FitResult] = []
+    if reduced_files:
+        print("\n=== Pass 2: Reduced-mode refinements ===")
+        params = dict(reference_params)
+        for idx, gr_path in reduced_files:
+            print(f"  [{idx}/{len(files)}] {gr_path.name}...", end=" ", flush=True)
+            try:
+                result = fit_one_multiphase(gr_path, config, mode="reduced",
+                                            initial_params=params,
+                                            reference_params=reference_params,
+                                            verbose=False)
+                result.timestamp = _parse_timestamp(gr_path)
+                params = result.params
+                reduced_results.append(result)
+                ts_str = f"  t={result.timestamp} ns" if result.timestamp is not None else ""
+                print(f"Rw = {result.rw:.4f}{ts_str}")
+            except Exception as e:
+                print(f"FAILED: {e}")
+
     indexed = (
         [(i, r) for (i, _), r in zip(full_files,    full_results)]    +
         [(i, r) for (i, _), r in zip(reduced_files, reduced_results)]
@@ -596,6 +930,8 @@ def fit_dgr_batch(
     if not files:
         raise FileNotFoundError(f"No .gr files found for: {gr_paths!r}")
 
+    files = _sort_by_timestamp(files)
+
     if not isinstance(reference, Reference):
         reference = build_reference(reference, config, verbose=True)
 
@@ -616,9 +952,11 @@ def fit_dgr_batch(
             result = fit_dgr(gr_path, reference, config,
                              initial_params=params,
                              pin_scale=pin_scale, verbose=False)
+            result.timestamp = _parse_timestamp(gr_path)
             params = result.params
             results.append(result)
-            print(f"Rw = {result.rw:.4f}")
+            ts_str = f"  t={result.timestamp} ns" if result.timestamp is not None else ""
+            print(f"Rw = {result.rw:.4f}{ts_str}")
         except Exception as e:
             print(f"FAILED: {e}")
 
@@ -659,23 +997,35 @@ def plot_series(
         print("plot_series: empty DataFrame — nothing to plot.")
         return None
 
-    if "index" in df.columns:
+    if "timestamp" in df.columns and df["timestamp"].notna().all():
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        indices = df["timestamp"].values
+        xlabel = "Time (ns)"
+    elif "index" in df.columns:
         df = df.sort_values("index").reset_index(drop=True)
         indices = df["index"].values
+        xlabel = "File index"
     else:
         indices = np.arange(1, len(df) + 1)
+        xlabel = "File index"
 
     _lat_names  = {"a", "b", "c", "alpha", "beta", "gamma"}
-    lat_cols    = [c for c in df.columns if c in _lat_names]
-    adp_cols    = [c for c in df.columns if c.startswith("ADP_")]
-    fixed_order = ["rw", "s1", "Delta2", "Calib_Qdamp", "Calib_Qbroad"]
-    plot_params = lat_cols + [p for p in fixed_order if p in df.columns] + adp_cols
+    lat_cols    = [c for c in df.columns
+                   if c in _lat_names or c.split("_")[-1] in _lat_names]
+    adp_cols    = [c for c in df.columns if "ADP_" in c or "Uiso_" in c]
+    scale_cols  = [c for c in df.columns if c == "s1" or c.endswith("_s1")]
+    d2_cols     = [c for c in df.columns if c == "Delta2" or c.endswith("_Delta2")]
+    inst_cols   = [c for c in ["Calib_Qdamp", "Calib_Qbroad"] if c in df.columns]
+    _seen: set  = set()
+    plot_params = [p for p in
+                   (["rw"] + scale_cols + lat_cols + d2_cols + inst_cols + adp_cols)
+                   if p in df.columns and p not in _seen and not _seen.add(p)]
 
     if not plot_params:
         print("plot_series: no plottable columns found.")
         return None
 
-    param_labels = {
+    _base_labels = {
         "rw":           "Rw",
         "a":            "a (Å)",
         "b":            "b (Å)",
@@ -689,6 +1039,17 @@ def plot_series(
         "Calib_Qbroad": "Qbroad (Å⁻¹)",
     }
 
+    def _label(name: str) -> str:
+        if name in _base_labels:
+            return _base_labels[name]
+        if "_" in name:
+            prefix, bare = name.split("_", 1)
+            base = _base_labels.get(bare, bare)
+            return f"{prefix}: {base}"
+        return name
+
+    param_labels = {p: _label(p) for p in plot_params}
+
     has_mode = "mode" in df.columns
     if has_mode:
         full_mask    = (df["mode"] == "full").values
@@ -701,7 +1062,7 @@ def plot_series(
     axes = axes.flatten()
 
     for ax, param in zip(axes, plot_params):
-        label = param_labels.get(param, param)
+        label = param_labels.get(param, _label(param))
         if has_mode:
             if full_mask.any():
                 ax.plot(indices[full_mask],    df.loc[full_mask,    param],
@@ -714,7 +1075,7 @@ def plot_series(
                         marker="s", ms=4, lw=1.0, mfc="none",  label="ΔG")
         else:
             ax.plot(indices, df[param], marker="o", ms=4, lw=1.2)
-        ax.set_xlabel("File index")
+        ax.set_xlabel(xlabel)
         ax.set_ylabel(label)
         ax.set_title(label)
         ax.tick_params(axis="both", which="major", top=True, right=True)
@@ -732,10 +1093,12 @@ def plot_series(
         fig.savefig(save_path, format="pdf")
         print(f"Series plot saved to {save_path}")
 
-    if not show:
+    if show:
+        plt.show()
+    else:
         plt.close(fig)
 
-    return None
+    return fig
 
 
 # ============================================================
@@ -806,6 +1169,34 @@ def save_reference_params(params: Dict, path: Union[str, Path]) -> None:
 # Private helpers
 # ============================================================
 
+def _parse_timestamp(path: Path) -> Optional[float]:
+    """
+    Extract the time value from a filename of the form Composition_time_gr.gr.
+
+    Returns the float time (ns) or None if the filename doesn't match.
+    """
+    parts = path.stem.split("_")
+    # stem example: BaTiO3_-10.0_gr  →  parts[-1]='gr', parts[-2]='-10.0'
+    if len(parts) >= 3 and parts[-1] == "gr":
+        try:
+            return float(parts[-2])
+        except ValueError:
+            pass
+    return None
+
+
+def _sort_by_timestamp(files: List[Path]) -> List[Path]:
+    """
+    Sort .gr files by parsed timestamp.  Files whose names don't match the
+    Composition_time_gr.gr convention fall back to alphabetical order and are
+    placed after timestamped files.
+    """
+    def _key(p: Path):
+        t = _parse_timestamp(p)
+        return (1, p.name) if t is None else (0, t)
+    return sorted(files, key=_key)
+
+
 def _resolve_gr_paths(gr_paths) -> List[Path]:
     """Accept a glob string, a directory, or a list of paths; return sorted list."""
     if isinstance(gr_paths, (list, tuple)):
@@ -860,6 +1251,79 @@ def _write_gr_file(path: Path, r: np.ndarray, g: np.ndarray, header: str = "") -
         f.write("#L r(A)  G(r)\n")
         for ri, gi in zip(r, g):
             f.write(f"{ri:.6f}  {gi:.6e}\n")
+
+
+def _parse_site_index(par_name: str) -> Optional[int]:
+    """Extract trailing site index from an ADP parameter name like 'U11_0' -> 0."""
+    parts = par_name.rsplit("_", 1)
+    if len(parts) == 2:
+        try:
+            return int(parts[1])
+        except ValueError:
+            pass
+    return None
+
+
+def _add_adp_vars(
+    recipe: "FitRecipe",
+    sgparams,
+    stru,
+    initial_params: Dict,
+    uiso_i: float,
+    fixed_params: Dict,
+    element_uiso: Dict,
+    name_prefix: str = "",
+) -> None:
+    """Add ADP variables to the recipe.
+
+    When element_uiso is non-empty, all ADP components (U11, U33, …) for each
+    listed element are tied to a single shared 'Uiso_<element>' recipe variable
+    via recipe.constrain(). Elements not listed use per-component behavior.
+    name_prefix is prepended to every parameter name (used for multi-phase fits).
+    """
+    if element_uiso:
+        site_to_element = {i: stru[i].element for i in range(len(stru))}
+        element_pars: Dict[str, list] = {}
+        ungrouped: list = []
+
+        for par in sgparams.adppars:
+            site_idx = _parse_site_index(par.name)
+            element = site_to_element.get(site_idx) if site_idx is not None else None
+            if element and element in element_uiso:
+                element_pars.setdefault(element, []).append(par)
+            else:
+                ungrouped.append(par)
+
+        for element, pars in element_pars.items():
+            uiso_name = f"{name_prefix}Uiso_{element}"
+            fixed_val = element_uiso[element]
+            is_fixed = isinstance(fixed_val, (int, float))
+            init_val = fixed_val if is_fixed else initial_params.get(uiso_name, uiso_i)
+            recipe.addVar(pars[0],
+                          value=init_val,
+                          name=uiso_name,
+                          fixed=is_fixed,
+                          tag="adp_fixed" if is_fixed else "adp")
+            for par in pars[1:]:
+                recipe.constrain(par, uiso_name)
+
+        for par in ungrouped:
+            adp_name = f"{name_prefix}ADP_{par.name}"
+            if adp_name in fixed_params:
+                recipe.addVar(par, value=fixed_params[adp_name],
+                              fixed=True, name=adp_name, tag="adp_fixed")
+            else:
+                recipe.addVar(par, value=initial_params.get(adp_name, uiso_i),
+                              fixed=False, name=adp_name, tag="adp")
+    else:
+        for par in sgparams.adppars:
+            adp_name = f"{name_prefix}ADP_{par.name}"
+            if adp_name in fixed_params:
+                recipe.addVar(par, value=fixed_params[adp_name],
+                              fixed=True, name=adp_name, tag="adp_fixed")
+            else:
+                recipe.addVar(par, value=initial_params.get(adp_name, uiso_i),
+                              fixed=False, name=adp_name, tag="adp")
 
 
 def _make_recipe(
@@ -918,11 +1382,8 @@ def _make_recipe(
         recipe.addVar(par,
                       value=initial_params.get(par.name, par.value),
                       fixed=False, name=par.name, tag="lat")
-    for par in sgparams.adppars:
-        adp_name = f"ADP_{par.name}"
-        recipe.addVar(par,
-                      value=initial_params.get(adp_name, config.uiso_i),
-                      fixed=False, name=adp_name, tag="adp")
+    _add_adp_vars(recipe, sgparams, stru, initial_params,
+                  config.uiso_i, config.fixed_params, config.element_uiso)
 
     recipe.addVar(generator.delta2,
                   name="Delta2",
@@ -1056,21 +1517,26 @@ def _make_dgr_recipe(
         recipe.addVar(par,
                       value=initial_params.get(par.name, par.value),
                       fixed=False, name=par.name, tag="lat")
-    for par in sgparams_pert.adppars:
-        adp_name = f"ADP_{par.name}"
-        recipe.addVar(par,
-                      value=initial_params.get(adp_name, config.uiso_i),
-                      fixed=False, name=adp_name, tag="adp")
+    _add_adp_vars(recipe, sgparams_pert, stru_pert, initial_params,
+                  config.uiso_i, config.fixed_params, config.element_uiso)
 
     # ---- Reference-structure space-group constraints (all fixed) ----
     sgparams_ref = constrainAsSpaceGroup(gen_ref.phase, config.space_group)
+    site_to_elem_ref = {i: stru_ref[i].element for i in range(len(stru_ref))}
     for par in sgparams_ref.latpars:
         ref_val = reference.params.get(par.name, par.value)
         recipe.addVar(par, value=ref_val, fixed=True,
                       name=f"{par.name}_ref", tag="lat_ref")
     for par in sgparams_ref.adppars:
         adp_name = f"ADP_{par.name}"
-        ref_val = reference.params.get(adp_name, config.uiso_i)
+        if adp_name in reference.params:
+            ref_val = reference.params[adp_name]
+        else:
+            # reference was fit with element_uiso — look up by element
+            site_idx = _parse_site_index(par.name)
+            element = site_to_elem_ref.get(site_idx) if site_idx is not None else None
+            uiso_key = f"Uiso_{element}" if element else None
+            ref_val = reference.params.get(uiso_key, config.uiso_i) if uiso_key else config.uiso_i
         recipe.addVar(par, value=ref_val, fixed=True,
                       name=f"{adp_name}_ref", tag="adp_ref")
 
@@ -1105,26 +1571,160 @@ def _make_dgr_recipe(
     return recipe
 
 
-def _get_bounds(recipe: FitRecipe, config: FitConfig):
-    """Build (lower, upper) bound arrays for currently free params; clips x0."""
+def _make_multiphase_recipe(
+    config: MultiPhaseFitConfig,
+    dat_path: Path,
+    initial_params: Optional[Dict] = None,
+    fix_instrumental: bool = False,
+) -> FitRecipe:
+    """Build a FitRecipe with one PDFGenerator per phase for multi-phase PDF fits.
+
+    Structural parameters are prefixed with each phase's name in the recipe
+    (e.g. 'cubic_a', 'tet_Delta2'). Qdamp and Qbroad are shared across all
+    generators: the first generator's params are added as recipe variables and
+    all remaining generators are constrained to equal them.
+    """
+    if initial_params is None:
+        initial_params = {}
+
+    profile = Profile()
+    parser  = PDFParser()
+    parser.parseFile(str(dat_path))
+    profile.loadParsedData(parser)
+    profile.setCalculationRange(xmin=config.rmin, xmax=config.rmax, dx=config.rstep)
+
+    contribution = FitContribution("crystal")
+    contribution.setProfile(profile, xname="r")
+
+    generators: List[PDFGenerator] = []
+    structures: list = []
+    for i, phase in enumerate(config.phases):
+        p_cif = get_parser("cif")
+        stru  = p_cif.parse_file(str(phase.cif_path))
+        gen   = PDFGenerator(f"G{i + 1}")
+        gen.setStructure(stru, periodic=True)
+
+        if config.run_parallel:
+            try:
+                import psutil
+                import multiprocessing
+                from multiprocessing import Pool
+                n_cores = multiprocessing.cpu_count()
+                avail   = np.floor((100 - psutil.cpu_percent()) / (100.0 / n_cores))
+                ncpu    = int(max(1, avail))
+                pool    = Pool(processes=ncpu)
+                gen.parallel(ncpu=ncpu, mapfunc=pool.map)
+            except ImportError:
+                pass
+
+        contribution.addProfileGenerator(gen)
+        generators.append(gen)
+        structures.append(stru)
+
+    # equation: "s1*G1 + s2*G2 + ..."
+    equation = " + ".join(f"s{i + 1}*G{i + 1}" for i in range(len(config.phases)))
+    contribution.setEquation(equation)
+
+    recipe = FitRecipe()
+    recipe.addContribution(contribution)
+
+    # Q-range and initial instrumental values for every generator
+    for gen in generators:
+        gen.qdamp.value  = initial_params.get("Calib_Qdamp",  config.qdamp_i)
+        gen.qbroad.value = initial_params.get("Calib_Qbroad", config.qbroad_i)
+        gen.setQmax(config.qmax)
+        gen.setQmin(config.qmin)
+
+    # Per-phase structural parameters
+    for i, (phase, gen, stru) in enumerate(zip(config.phases, generators, structures)):
+        pname = phase.name
+
+        # Scale — auto-created by equation; renamed with phase prefix in recipe
+        s_attr = getattr(contribution, f"s{i + 1}")
+        recipe.addVar(s_attr,
+                      value=initial_params.get(f"{pname}_s1", phase.scale_i),
+                      name=f"{pname}_s1",
+                      tag="scale")
+
+        sgparams = constrainAsSpaceGroup(gen.phase, phase.space_group)
+        for par in sgparams.latpars:
+            param_name = f"{pname}_{par.name}"
+            recipe.addVar(par,
+                          value=initial_params.get(param_name, par.value),
+                          name=param_name,
+                          fixed=False, tag="lat")
+        _add_adp_vars(recipe, sgparams, stru, initial_params,
+                      phase.uiso_i, phase.fixed_params, phase.element_uiso,
+                      name_prefix=f"{pname}_")
+
+        d2_name = f"{pname}_Delta2"
+        recipe.addVar(gen.delta2,
+                      name=d2_name,
+                      value=initial_params.get(d2_name, phase.delta2_i),
+                      tag="d2")
+
+    # Shared instrumental — add from first generator, constrain remaining ones
+    qdamp_fixed  = fix_instrumental or config.fix_qdamp
+    qbroad_fixed = fix_instrumental or config.fix_qbroad
+
+    recipe.addVar(generators[0].qdamp,
+                  name="Calib_Qdamp",
+                  value=initial_params.get("Calib_Qdamp", config.qdamp_i),
+                  fixed=qdamp_fixed, tag="inst")
+    recipe.addVar(generators[0].qbroad,
+                  name="Calib_Qbroad",
+                  value=initial_params.get("Calib_Qbroad", config.qbroad_i),
+                  fixed=qbroad_fixed, tag="inst")
+
+    for gen in generators[1:]:
+        recipe.constrain(gen.qdamp,  "Calib_Qdamp")
+        recipe.constrain(gen.qbroad, "Calib_Qbroad")
+
+    return recipe
+
+
+def _get_bounds(recipe: FitRecipe, config) -> Optional[Tuple]:
+    """Build (lower, upper) bound arrays for currently free params; clips x0.
+
+    Accepts both FitConfig and MultiPhaseFitConfig. For multi-phase configs,
+    phase-prefixed names (e.g. 'cubic_a') are resolved by stripping the
+    prefix and looking up the bare name in the global and per-phase bounds.
+    """
     names = recipe.names
     if not names:
         return None
 
     lower = np.full(len(names), -np.inf)
     upper = np.full(len(names),  np.inf)
+    bounds = config.param_bounds
+    phases = getattr(config, "phases", [])
 
     for i, name in enumerate(names):
         # ΔG fits create *_ref names — strip the suffix when looking up bounds.
         lookup = name[:-4] if name.endswith("_ref") else name
-        if lookup in config.param_bounds:
-            lo, hi = config.param_bounds[lookup]
-            if lo is not None: lower[i] = lo
-            if hi is not None: upper[i] = hi
-        elif lookup.startswith("ADP_") and "_adp_default" in config.param_bounds:
-            lo, hi = config.param_bounds["_adp_default"]
-            if lo is not None: lower[i] = lo
-            if hi is not None: upper[i] = hi
+
+        lo, hi = None, None
+
+        if lookup in bounds:
+            lo, hi = bounds[lookup]
+        elif (lookup.startswith("ADP_") or lookup.startswith("Uiso_")) and "_adp_default" in bounds:
+            lo, hi = bounds["_adp_default"]
+        else:
+            # Multi-phase: strip phase prefix and retry
+            for phase in phases:
+                prefix = f"{phase.name}_"
+                if lookup.startswith(prefix):
+                    bare = lookup[len(prefix):]
+                    if bare in phase.param_bounds:
+                        lo, hi = phase.param_bounds[bare]
+                    elif bare in bounds:
+                        lo, hi = bounds[bare]
+                    elif (bare.startswith("ADP_") or bare.startswith("Uiso_")) and "_adp_default" in bounds:
+                        lo, hi = bounds["_adp_default"]
+                    break
+
+        if lo is not None: lower[i] = lo
+        if hi is not None: upper[i] = hi
 
     eps  = 1e-9
     vals = np.array(recipe.values, dtype=float)
@@ -1150,6 +1750,15 @@ def _rw(recipe: FitRecipe) -> float:
     return float(np.sqrt(np.sum((y - ycalc) ** 2) / np.sum(y ** 2)))
 
 
+def _safe_free(recipe: FitRecipe, tag: str) -> bool:
+    """Free parameters by tag; returns False (no-op) if the tag has no members."""
+    try:
+        recipe.free(tag)
+        return True
+    except (ValueError, KeyError):
+        return False
+
+
 def _fit_full(recipe: FitRecipe, config: FitConfig, verbose: bool = False) -> None:
     recipe.fix("all")
 
@@ -1161,9 +1770,9 @@ def _fit_full(recipe: FitRecipe, config: FitConfig, verbose: bool = False) -> No
     _run_least_squares(recipe, config)
     if verbose: print(f"    + lat          Rw = {_rw(recipe):.4f}")
 
-    recipe.free("adp")
-    _run_least_squares(recipe, config)
-    if verbose: print(f"    + adp          Rw = {_rw(recipe):.4f}")
+    if _safe_free(recipe, "adp"):
+        _run_least_squares(recipe, config)
+        if verbose: print(f"    + adp          Rw = {_rw(recipe):.4f}")
 
     recipe.free("d2")
     _run_least_squares(recipe, config)
@@ -1189,9 +1798,9 @@ def _fit_reduced(recipe: FitRecipe, config: FitConfig, verbose: bool = False) ->
     _run_least_squares(recipe, config)
     if verbose: print(f"    + lat          Rw = {_rw(recipe):.4f}")
 
-    recipe.free("adp")
-    _run_least_squares(recipe, config)
-    if verbose: print(f"    + adp          Rw = {_rw(recipe):.4f}")
+    if _safe_free(recipe, "adp"):
+        _run_least_squares(recipe, config)
+        if verbose: print(f"    + adp          Rw = {_rw(recipe):.4f}")
 
     _run_least_squares(recipe, config)
     if verbose: print(f"    final polish   Rw = {_rw(recipe):.4f}")
@@ -1199,22 +1808,23 @@ def _fit_reduced(recipe: FitRecipe, config: FitConfig, verbose: bool = False) ->
 
 def _fit_dgr(recipe: FitRecipe, config: FitConfig, verbose: bool = False) -> None:
     """Staged ΔG refinement: (optional scale) → lat → adp → polish."""
+    # Snapshot free params before fix("all") empties recipe.names.
+    free_before = set(recipe.names)
+
     recipe.fix("all")
 
-    if "s1" in recipe.names:
-        # only free if it wasn't pinned in _make_dgr_recipe
-        if not recipe.get("s1").const:
-            recipe.free("s1")
-            _run_least_squares(recipe, config)
-            if verbose: print(f"    scale          Rw = {_rw(recipe):.4f}")
+    if "s1" in free_before:
+        recipe.free("s1")
+        _run_least_squares(recipe, config)
+        if verbose: print(f"    scale          Rw = {_rw(recipe):.4f}")
 
     recipe.free("lat")
     _run_least_squares(recipe, config)
     if verbose: print(f"    + lat          Rw = {_rw(recipe):.4f}")
 
-    recipe.free("adp")
-    _run_least_squares(recipe, config)
-    if verbose: print(f"    + adp          Rw = {_rw(recipe):.4f}")
+    if _safe_free(recipe, "adp"):
+        _run_least_squares(recipe, config)
+        if verbose: print(f"    + adp          Rw = {_rw(recipe):.4f}")
 
     _run_least_squares(recipe, config)
     if verbose: print(f"    final polish   Rw = {_rw(recipe):.4f}")

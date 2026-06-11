@@ -31,6 +31,18 @@ FILENAME_PATTERNS = {
         r"(?P<image_number>\d+)\.tif$",
         re.IGNORECASE,
     ),
+    # Matches filenames like: BTO400nmS3_240Kstaticnospin-1.0fshw-9e-09delay00009_4668.tif
+    # sample_name captures the base prefix before the temperature (e.g. "BTO400nmS3_")
+    "temp_dep": re.compile(
+        r"^(?P<sample_name>[A-Za-z0-9_]+?)"
+        r"(?P<temperature>\d+)K"
+        r"(?:[A-Za-z]+)?"
+        r"(?P<fluence>[-+]?\d*\.?\d+)fs"
+        r"hw(?P<delay>[-+]?\d*\.?\d+(?:e[-+]?\d+)?)"
+        r"delay(?P<scan_number>\d+)"
+        r"_(?P<image_number>\d+)\.tif$",
+        re.IGNORECASE,
+    ),
 }
 
 GR_FILENAME_PATTERNS = {
@@ -49,6 +61,49 @@ GR_FILENAME_PATTERNS = {
         r"(?P<theta>[-+]?\d*\.?\d+)"
         r"samz(?P<samz>\d+)_"
         r"(?P<scan_number>\d+)\.gr$",
+        re.IGNORECASE,
+    ),
+    # Matches filenames like: BTO400S3_staticTdep240K-1.0fshw1e-09delay00000_077.gr
+    # sample_name captures the base prefix before the temperature (e.g. "BTO400S3_staticTdep")
+    "temp_dep": re.compile(
+        r"^(?P<sample_name>[A-Za-z0-9_]+?)"
+        r"(?P<temperature>\d+)K"
+        r"(?P<fluence>[-+]?\d*\.?\d+)fs"
+        r"hw(?P<delay>[-+]?\d*\.?\d+(?:e[-+]?\d+)?)"
+        r"delay(?P<scan_number>\d+)"
+        r"_(?P<image_number>\d+)\.gr$",
+        re.IGNORECASE,
+    ),
+}
+
+DAT_FILENAME_PATTERNS = {
+    "delay_scan": re.compile(
+        r"^(?P<sample_name>[A-Za-z0-9_]+)-"
+        r"(?P<fluence>[-+]?\d*\.?\d+)fs"
+        r"hw(?P<delay>[-+]?\d*\.?\d+(?:e[-+]?\d+)?)"
+        r"delay(?P<scan_number>\d+)"
+        r"(?:_\w+)?\.dat$",
+        re.IGNORECASE,
+    ),
+    "theta_samz": re.compile(
+        r"^(?P<sample_name>[A-Za-z]+[A-Za-z0-9]*)"
+        r"(?P<scan_id>M\d+)_"
+        r"(?P<degree>[-+]?\d*\.?\d+)"
+        r"-deg_theta"
+        r"(?P<theta>[-+]?\d*\.?\d+)"
+        r"samz(?P<samz>\d+)_"
+        r"(?P<scan_number>\d+)"
+        r"(?:_\w+)?\.dat$",
+        re.IGNORECASE,
+    ),
+    "temp_dep": re.compile(
+        r"^(?P<sample_name>[A-Za-z0-9_]+?)"
+        r"(?P<temperature>\d+)K"
+        r"(?P<fluence>[-+]?\d*\.?\d+)fs"
+        r"hw(?P<delay>[-+]?\d*\.?\d+(?:e[-+]?\d+)?)"
+        r"delay(?P<scan_number>\d+)"
+        r"_(?P<image_number>\d+)"
+        r"(?:_\w+)?\.dat$",
         re.IGNORECASE,
     ),
 }
@@ -186,7 +241,7 @@ def _parse_gr_filename(file_name, scheme="delay_scan"):
         if key in parsed and parsed[key] is not None:
             parsed[key] = float(parsed[key])
 
-    for key in ["scan_number", "samz"]:
+    for key in ["scan_number", "samz", "image_number", "temperature"]:
         if key in parsed and parsed[key] is not None:
             parsed[key] = int(parsed[key])
 
@@ -236,6 +291,81 @@ def _read_gr_file(file_path, comment_chars=("#",)):
     gr = arr[:, 1]
 
     return r, gr
+
+
+def _parse_dat_filename(file_name, scheme="delay_scan"):
+    """
+    Parse one .dat filename using a selected naming scheme.
+    """
+    name = Path(file_name).name
+
+    if scheme not in DAT_FILENAME_PATTERNS:
+        raise ValueError(
+            f"Unknown filename scheme '{scheme}'. "
+            f"Available schemes are: {list(DAT_FILENAME_PATTERNS)}"
+        )
+
+    pattern = DAT_FILENAME_PATTERNS[scheme]
+    match = pattern.search(name)
+
+    if match is None:
+        raise ValueError(f"Could not parse .dat filename with scheme '{scheme}': {name}")
+
+    parsed = match.groupdict()
+
+    for key in ["fluence", "delay", "theta", "degree"]:
+        if key in parsed and parsed[key] is not None:
+            parsed[key] = float(parsed[key])
+
+    for key in ["scan_number", "samz", "image_number", "temperature"]:
+        if key in parsed and parsed[key] is not None:
+            parsed[key] = int(parsed[key])
+
+    parsed["file_name"] = str(file_name)
+
+    return parsed
+
+
+def _read_dat_file(file_path, comment_chars=("#",)):
+    """
+    Read a .dat file with two numeric columns: Q, I(Q).
+
+    Returns
+    -------
+    q : np.ndarray
+    iq : np.ndarray
+    """
+    rows = []
+
+    with open(file_path, "r") as f:
+        for line in f:
+            line = line.strip()
+
+            if not line:
+                continue
+
+            if any(line.startswith(c) for c in comment_chars):
+                continue
+
+            parts = line.split()
+            try:
+                vals = [float(x) for x in parts]
+            except ValueError:
+                continue
+
+            if len(vals) < 2:
+                continue
+
+            rows.append(vals[:2])
+
+    if len(rows) == 0:
+        raise ValueError(f"No numeric 2-column data found in file: {file_path}")
+
+    arr = np.array(rows, dtype=float)
+    q = arr[:, 0]
+    iq = arr[:, 1]
+
+    return q, iq
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +477,7 @@ def get_image_details(
     if not folder.is_dir():
         raise ValueError(f"Path is not a directory: {folder}")
 
-    file_names = sorted(folder.glob(f"{sample_name}*.tif"))
+    file_names = sorted(folder.glob(f"{sample_name}-*.tif"))
     print(f"{len(file_names)} TIFF files found in {folder} with scan name {sample_name}.")
 
     if len(file_names) == 0:
@@ -363,8 +493,8 @@ def get_image_details(
             continue
 
         if sample_name is not None:
-            parsed_sample = meta.get("sample_name", "")
-            if parsed_sample.lower() != sample_name.lower():
+            file_stem = Path(file_name).name.lower()
+            if not file_stem.startswith(sample_name.lower()):
                 continue
 
         metadata.append(meta)
@@ -495,7 +625,7 @@ def get_images_by_scan_name(
         file_names = list(folder.glob("*.tif"))
         print(f"{len(file_names)} TIFF files found in {folder}.")
     else:
-        file_names = list(folder.glob(f"{scan_name}*.tif"))
+        file_names = list(folder.glob(f"{scan_name}-*.tif"))
         print(f"{len(file_names)} TIFF files found in {folder} with scan name {scan_name}.")
 
     if sort:
@@ -747,7 +877,7 @@ def get_grs_by_scan_name(
         file_names = list(folder.glob("*.gr"))
         print(f"{len(file_names)} .gr files found in {folder}.")
     else:
-        file_names = list(folder.glob(f"{scan_name}*.gr"))
+        file_names = list(folder.glob(f"{scan_name}-*.gr"))
         print(f"{len(file_names)} .gr files found in {folder} with scan name {scan_name}.")
 
     if sort:
@@ -873,8 +1003,8 @@ def get_gr_details(
             continue
 
         if sample_name is not None:
-            parsed_sample = meta.get("sample_name", "")
-            if parsed_sample.lower() != sample_name.lower():
+            file_stem = Path(file_name).name.lower()
+            if not file_stem.startswith(sample_name.lower()):
                 continue
 
         metadata.append(meta)
@@ -962,6 +1092,169 @@ def get_gr_details(
     data_dict = {
         "r": r_ref,
         "grs": grs,
+        "file_names": cleaned_files,
+    }
+    data_dict.update(meta_arrays)
+
+    return data_dict
+
+
+def get_dat_details(
+    folder_path,
+    sample_name=None,
+    filename_scheme="delay_scan",
+    sort=True,
+    sort_key="scan_number",
+    filter_data=False,
+    delay_sign=1,
+    plot=False,
+    enforce_same_q=True,
+):
+    """
+    Read .dat files (Q, I(Q)) from a folder and extract filename metadata.
+
+    Parameters
+    ----------
+    folder_path : str or Path
+        Folder containing .dat files.
+    sample_name : str or None, optional
+        If provided, only keep files whose parsed sample_name matches this
+        value (case-insensitive).
+    filename_scheme : str
+        Key from DAT_FILENAME_PATTERNS, e.g. "delay_scan" or "theta_samz".
+    sort : bool, optional
+        If True, sort by sort_key if available.
+    sort_key : str
+        Metadata field to sort by. Usually "scan_number", "delay", or "theta".
+    filter_data : bool or list-like, optional
+        If False, use all data.
+        If list-like [min_index, max_index], keep only that slice after sorting.
+    delay_sign : int or float, optional
+        Multiply parsed delay values by this factor.
+    plot : bool, optional
+        If True, plot I(Q) from the first file.
+    enforce_same_q : bool, optional
+        If True, require all files to have the same Q grid.
+
+    Returns
+    -------
+    dict
+        Dictionary containing "q", "iqs", "file_names", and all parsed
+        metadata fields for the selected filename_scheme.
+    """
+    folder = Path(folder_path)
+
+    if not folder.exists():
+        raise ValueError(f"Folder does not exist: {folder}")
+
+    if not folder.is_dir():
+        raise ValueError(f"Path is not a directory: {folder}")
+
+    file_names = sorted(folder.glob("*.dat"))
+    print(f"{len(file_names)} .dat files found in {folder}")
+
+    if len(file_names) == 0:
+        raise ValueError(f"No .dat files found in folder: {folder}")
+
+    metadata = []
+    cleaned_files = []
+
+    for file_name in file_names:
+        try:
+            meta = _parse_dat_filename(file_name, scheme=filename_scheme)
+        except ValueError:
+            continue
+
+        if sample_name is not None:
+            file_stem = Path(file_name).name.lower()
+            if not file_stem.startswith(sample_name.lower()):
+                continue
+
+        metadata.append(meta)
+        cleaned_files.append(str(file_name))
+
+    if len(cleaned_files) == 0:
+        raise ValueError(
+            f"No .dat files matched filename_scheme='{filename_scheme}'"
+            + (f" and sample_name='{sample_name}'." if sample_name is not None else ".")
+        )
+
+    meta_arrays = {}
+    all_keys = set()
+    for meta in metadata:
+        all_keys.update(meta.keys())
+
+    for key in all_keys:
+        values = [meta.get(key, np.nan) for meta in metadata]
+
+        if key in ["sample_name", "file_name", "scan_id"]:
+            meta_arrays[key] = np.array(values, dtype=str)
+        else:
+            meta_arrays[key] = np.array(values)
+
+    cleaned_files = np.array(cleaned_files, dtype=str)
+
+    if "delay" in meta_arrays:
+        meta_arrays["delay"] = delay_sign * meta_arrays["delay"].astype(float)
+
+    if sort:
+        if sort_key in meta_arrays:
+            idx_sort = np.argsort(meta_arrays[sort_key])
+        elif "scan_number" in meta_arrays:
+            idx_sort = np.argsort(meta_arrays["scan_number"])
+        else:
+            idx_sort = np.arange(len(cleaned_files))
+
+        for key in meta_arrays:
+            meta_arrays[key] = meta_arrays[key][idx_sort]
+
+        cleaned_files = cleaned_files[idx_sort]
+
+    if isinstance(filter_data, (list, tuple, np.ndarray)):
+        if len(filter_data) != 2:
+            raise ValueError("filter_data must be False or [min_index, max_index].")
+
+        min_val, max_val = filter_data
+
+        if min_val < 0 or max_val > len(cleaned_files):
+            raise ValueError("filter_data range is out of bounds.")
+
+        for key in meta_arrays:
+            meta_arrays[key] = meta_arrays[key][min_val:max_val]
+
+        cleaned_files = cleaned_files[min_val:max_val]
+
+    q_ref = None
+    iq_list = []
+
+    for file in cleaned_files:
+        q, iq = _read_dat_file(file)
+
+        if q_ref is None:
+            q_ref = q
+        elif enforce_same_q:
+            if len(q) != len(q_ref) or not np.allclose(q, q_ref):
+                raise ValueError(
+                    f"Q grid mismatch in file: {file}\n"
+                    "Set enforce_same_q=False if you want to handle this manually."
+                )
+
+        iq_list.append(iq)
+
+    iqs = np.array(iq_list, dtype=float)
+
+    if plot:
+        plt.figure(figsize=(7, 5))
+        plt.plot(q_ref, iqs[0])
+        plt.xlabel("Q")
+        plt.ylabel("I(Q)")
+        plt.title("First .dat file")
+        plt.tight_layout()
+        plt.show()
+
+    data_dict = {
+        "q": q_ref,
+        "iqs": iqs,
         "file_names": cleaned_files,
     }
     data_dict.update(meta_arrays)

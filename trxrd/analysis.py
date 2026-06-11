@@ -3,6 +3,9 @@ import matplotlib.pyplot as plt
 import concurrent.futures
 from functools import partial
 from scipy.ndimage import gaussian_filter1d
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
+from scipy.interpolate import interp1d
 
 from globals import FIGSIZE, STD_FACTOR, MAX_PROCESSORS
 from trxrd.io import _as_image_stack, _restore_image_dimensionality, _get_counts
@@ -1404,3 +1407,738 @@ def average_delta_grs_by_delay(
         return grouped_dict
 
     return unique_delays, mean_delta_grs, std_delta_grs, counts_per_delay
+
+
+def average_grs_by_temperature(
+    data_dict,
+    return_dict=True,
+):
+    """
+    Group G(r) curves by temperature and compute the mean and std for each temperature.
+
+    Intended for use with .gr files parsed using the "temp_dep" filename scheme,
+    where each file carries a temperature label in its name.
+
+    Parameters
+    ----------
+    data_dict : dict
+        Dictionary containing at least:
+        - "grs"         : np.ndarray of shape (n_curves, n_r)
+        - "temperature" : np.ndarray of shape (n_curves,)  [Kelvin, integer]
+
+        May also contain:
+        - "r"
+        - "file_names"
+        - "scan_number"
+        - "image_number"
+        - "sample_name"
+    return_dict : bool, optional
+        If True, return a dictionary. If False, return a tuple.
+
+    Returns
+    -------
+    result : dict or tuple
+        If return_dict=True:
+            {
+                "r"                    : np.ndarray of shape (n_r,),
+                "grs"                  : np.ndarray of shape (n_temps, n_r),
+                "std_grs"              : np.ndarray of shape (n_temps, n_r),
+                "temperature"          : np.ndarray of shape (n_temps,),
+                "counts_per_temp"      : np.ndarray of shape (n_temps,),
+                "indices_by_temp"      : dict,
+                "grouped_file_names"   : dict,
+                "grouped_scan_numbers" : dict,
+            }
+
+        If return_dict=False:
+            (unique_temps, mean_grs, std_grs, counts_per_temp)
+    """
+    required_keys = ["grs", "temperature"]
+    for key in required_keys:
+        if key not in data_dict:
+            raise ValueError(f"data_dict is missing required key: '{key}'")
+
+    grs = np.asarray(data_dict["grs"], dtype=float)
+    temperatures = np.asarray(data_dict["temperature"], dtype=float)
+
+    if grs.ndim != 2:
+        raise ValueError("data_dict['grs'] must be 2D with shape (n_curves, n_r).")
+    if temperatures.ndim != 1:
+        raise ValueError("data_dict['temperature'] must be 1D.")
+    if grs.shape[0] != len(temperatures):
+        raise ValueError("Number of G(r) curves must match number of temperature values.")
+
+    r = None
+    if "r" in data_dict:
+        r = np.asarray(data_dict["r"], dtype=float)
+
+    unique_temps = np.array(sorted(np.unique(temperatures)), dtype=float)
+
+    mean_grs = []
+    std_grs = []
+    counts_per_temp = []
+    indices_by_temp = {}
+    grouped_file_names = {}
+    grouped_scan_numbers = {}
+
+    for temp_val in unique_temps:
+        idx = np.where(temperatures == temp_val)[0]
+        indices_by_temp[temp_val] = idx
+        counts_per_temp.append(len(idx))
+
+        group = grs[idx]
+        mean_grs.append(np.nanmean(group, axis=0))
+        std_grs.append(np.nanstd(group, axis=0))
+
+        if "file_names" in data_dict:
+            grouped_file_names[temp_val] = np.asarray(data_dict["file_names"])[idx]
+        if "scan_number" in data_dict:
+            grouped_scan_numbers[temp_val] = np.asarray(data_dict["scan_number"])[idx]
+
+    mean_grs = np.asarray(mean_grs, dtype=float)
+    std_grs = np.asarray(std_grs, dtype=float)
+    counts_per_temp = np.asarray(counts_per_temp, dtype=int)
+
+    result = {
+        "grs": mean_grs,
+        "std_grs": std_grs,
+        "temperature": unique_temps,
+        "counts_per_temp": counts_per_temp,
+        "indices_by_temp": indices_by_temp,
+        "grouped_file_names": grouped_file_names,
+        "grouped_scan_numbers": grouped_scan_numbers,
+    }
+
+    if r is not None:
+        result["r"] = r
+
+    if return_dict:
+        return result
+
+    return unique_temps, mean_grs, std_grs, counts_per_temp
+
+
+def average_iqs_by_temperature(
+    data_dict,
+    return_dict=True,
+):
+    """
+    Group I(Q) curves by temperature and compute the mean and std for each temperature.
+
+    Intended for use with the dict returned by get_dat_details() using the
+    "temp_dep" filename scheme.
+
+    Parameters
+    ----------
+    data_dict : dict
+        Dictionary containing at least:
+        - "iqs"         : np.ndarray of shape (n_curves, n_q)
+        - "temperature" : np.ndarray of shape (n_curves,)  [Kelvin, integer]
+
+        May also contain "q", "file_names", "scan_number", "image_number",
+        "sample_name".
+    return_dict : bool, optional
+        If True, return a dictionary. If False, return a tuple.
+
+    Returns
+    -------
+    result : dict or tuple
+        If return_dict=True:
+            {
+                "q"                    : np.ndarray of shape (n_q,),
+                "iqs"                  : np.ndarray of shape (n_temps, n_q),
+                "std_iqs"              : np.ndarray of shape (n_temps, n_q),
+                "temperature"          : np.ndarray of shape (n_temps,),
+                "counts_per_temp"      : np.ndarray of shape (n_temps,),
+                "indices_by_temp"      : dict,
+                "grouped_file_names"   : dict,
+                "grouped_scan_numbers" : dict,
+            }
+
+        If return_dict=False:
+            (unique_temps, mean_iqs, std_iqs, counts_per_temp)
+    """
+    required_keys = ["iqs", "temperature"]
+    for key in required_keys:
+        if key not in data_dict:
+            raise ValueError(f"data_dict is missing required key: '{key}'")
+
+    iqs = np.asarray(data_dict["iqs"], dtype=float)
+    temperatures = np.asarray(data_dict["temperature"], dtype=float)
+
+    if iqs.ndim != 2:
+        raise ValueError("data_dict['iqs'] must be 2D with shape (n_curves, n_q).")
+    if temperatures.ndim != 1:
+        raise ValueError("data_dict['temperature'] must be 1D.")
+    if iqs.shape[0] != len(temperatures):
+        raise ValueError("Number of I(Q) curves must match number of temperature values.")
+
+    q = None
+    if "q" in data_dict:
+        q = np.asarray(data_dict["q"], dtype=float)
+
+    unique_temps = np.array(sorted(np.unique(temperatures)), dtype=float)
+
+    mean_iqs = []
+    std_iqs = []
+    counts_per_temp = []
+    indices_by_temp = {}
+    grouped_file_names = {}
+    grouped_scan_numbers = {}
+
+    for temp_val in unique_temps:
+        idx = np.where(temperatures == temp_val)[0]
+        indices_by_temp[temp_val] = idx
+        counts_per_temp.append(len(idx))
+
+        group = iqs[idx]
+        mean_iqs.append(np.nanmean(group, axis=0))
+        std_iqs.append(np.nanstd(group, axis=0))
+
+        if "file_names" in data_dict:
+            grouped_file_names[temp_val] = np.asarray(data_dict["file_names"])[idx]
+        if "scan_number" in data_dict:
+            grouped_scan_numbers[temp_val] = np.asarray(data_dict["scan_number"])[idx]
+
+    mean_iqs = np.asarray(mean_iqs, dtype=float)
+    std_iqs = np.asarray(std_iqs, dtype=float)
+    counts_per_temp = np.asarray(counts_per_temp, dtype=int)
+
+    result = {
+        "iqs": mean_iqs,
+        "std_iqs": std_iqs,
+        "temperature": unique_temps,
+        "counts_per_temp": counts_per_temp,
+        "indices_by_temp": indices_by_temp,
+        "grouped_file_names": grouped_file_names,
+        "grouped_scan_numbers": grouped_scan_numbers,
+    }
+
+    if q is not None:
+        result["q"] = q
+
+    if return_dict:
+        return result
+
+    return unique_temps, mean_iqs, std_iqs, counts_per_temp
+
+
+def svd_analysis(data, axis_values, time_values, n_components=None,
+                         center=False, weights=None):
+    """
+    Perform SVD on time-resolved difference data (dI(q) or dG(r)).
+
+    Parameters
+    ----------
+    data : ndarray, shape (n_axis, n_time)
+        Difference signal. Rows = q or r points, columns = time delays.
+    axis_values : ndarray, shape (n_axis,)
+        The q or r grid corresponding to rows of `data`.
+    time_values : ndarray, shape (n_time,)
+        Time delays corresponding to columns of `data`.
+    n_components : int, optional
+        Number of components to retain. Defaults to all.
+    center : bool, default False
+        If True, subtract the mean along the time axis from each row before SVD.
+        Usually False for difference data (already referenced to t<0).
+    weights : ndarray, shape (n_axis,), optional
+        Per-row weights (e.g., 1/sigma or q^2). Applied before SVD and
+        unwound afterward so left vectors are in original units.
+
+    Returns
+    -------
+    dict with keys:
+        'U'        : left singular vectors, shape (n_axis, k)  -- spatial/structural basis
+        'S'        : singular values, shape (k,)
+        'Vt'       : right singular vectors transposed, shape (k, n_time)
+                     -- each row is a time trace for one component
+        'variance_explained' : fraction of variance per component
+        'reconstruction'     : rank-k reconstruction of data
+        'axis_values', 'time_values' : passed through for plotting
+    """
+    M = np.asarray(data, dtype=float).copy()
+
+    # Orientation check
+    if M.shape != (len(axis_values), len(time_values)):
+        raise ValueError(
+            f"data shape {M.shape} does not match "
+            f"(len(axis_values)={len(axis_values)}, "
+            f"len(time_values)={len(time_values)}). "
+            f"You may need to transpose."
+        )
+
+    # Optional centering (rarely needed for difference data)
+    if center:
+        M = M - M.mean(axis=1, keepdims=True)
+
+    # Optional row weighting
+    if weights is not None:
+        w = np.asarray(weights, dtype=float)
+        if w.shape != (M.shape[0],):
+            raise ValueError("weights must have length n_axis")
+        M = M * w[:, None]
+
+    # The core operation: economy SVD
+    U, S, Vt = np.linalg.svd(M, full_matrices=False)
+
+    # Unwind weighting so U is in physical units
+    if weights is not None:
+        U = U / w[:, None]
+
+    # Truncate
+    k = n_components if n_components is not None else len(S)
+    U, S, Vt = U[:, :k], S[:k], Vt[:k, :]
+
+    # Variance explained (from full spectrum, not truncated)
+    _, S_full, _ = np.linalg.svd(M, full_matrices=False)
+    variance_explained = (S_full ** 2) / (S_full ** 2).sum()
+
+    reconstruction = U @ np.diag(S) @ Vt
+
+    return {
+        'U': U,
+        'S': S,
+        'Vt': Vt,
+        'variance_explained': variance_explained[:k],
+        'reconstruction': reconstruction,
+        'axis_values': axis_values,
+        'time_values': time_values,
+    }
+
+# Tracking peak drift across lab time
+# ---------- model ----------
+
+def gaussian(q, amp, center, sigma, offset):
+    return amp * np.exp(-0.5 * ((q - center) / sigma) ** 2) + offset
+
+
+# ---------- peak detection on reference ----------
+
+def detect_peaks(q, I_ref, height=None, prominence=None, distance=None, width=None):
+    """
+    Detect peaks on a 1D reference pattern.
+
+    Parameters
+    ----------
+    q, I_ref : 1D arrays
+    height, prominence, distance, width : passed to scipy.signal.find_peaks.
+        Tune these to your data. `prominence` is usually the most useful knob.
+
+    Returns
+    -------
+    peak_indices : indices into q
+    peak_q       : q positions of detected peaks
+    half_widths  : rough HWHM estimate (in q units) per peak, for fit windowing
+    """
+    finite_mask = np.isfinite(I_ref)
+    if not finite_mask.any():
+        raise ValueError("Reference pattern is entirely NaN.")
+    I_clean = np.where(finite_mask, I_ref, np.nanmin(I_ref) - 1.0)
+
+    idx, props = find_peaks(I_clean, height=height, prominence=prominence,
+                            distance=distance, width=width)
+
+    # Drop any detected peaks that landed in originally-NaN regions (shouldn't
+    # happen given the replacement, but be safe)
+    idx = idx[finite_mask[idx]]
+
+    if "widths" in props and len(props["widths"]) == len(idx):
+        widths_samples = props["widths"]
+    else:
+        from scipy.signal import peak_widths
+        widths_samples, *_ = peak_widths(I_clean, idx, rel_height=0.5)
+
+    dq = np.median(np.diff(q))
+    half_widths = 0.5 * widths_samples * dq
+
+    return idx, q[idx], half_widths
+
+
+
+# ---------- single-pattern, single-peak fit ----------
+
+def fit_one_peak(q, I, q0, hwhm, window_factor=3.0):
+    """Fit a Gaussian to one peak in a single pattern. NaN-aware."""
+    qlo, qhi = q0 - window_factor * hwhm, q0 + window_factor * hwhm
+    mask = (q >= qlo) & (q <= qhi) & np.isfinite(I)   # <-- added isfinite
+    if mask.sum() < 5:
+        return np.full(4, np.nan), np.full(4, np.nan)
+
+    qw, Iw = q[mask], I[mask]
+
+    offset0 = np.min(Iw)
+    amp0 = np.max(Iw) - offset0
+    sigma0 = hwhm / np.sqrt(2 * np.log(2))
+    p0 = [amp0, q0, sigma0, offset0]
+
+    bounds = (
+        [0,      qlo, 1e-6,        -np.inf],
+        [np.inf, qhi, (qhi - qlo),  np.inf],
+    )
+
+    try:
+        popt, pcov = curve_fit(gaussian, qw, Iw, p0=p0, bounds=bounds, maxfev=2000)
+        perr = np.sqrt(np.diag(pcov))
+        return popt, perr
+    except (RuntimeError, ValueError):
+        return np.full(4, np.nan), np.full(4, np.nan)
+
+
+# ---------- main driver ----------
+
+def track_peaks(q, I_stack, ref="first", height=None, prominence=None,
+                distance=None, width=None, window_factor=3.0):
+    """
+    Track Gaussian peak parameters across a stack of patterns.
+
+    Parameters
+    ----------
+    q       : (Nq,) array of q values
+    I_stack : (Nq, Nimg) array of intensities  [q axis first, images second]
+    ref     : 'first', 'mean', or an integer image index. Used for peak detection.
+    height, prominence, distance, width : find_peaks kwargs (tune these!)
+    window_factor : fit window is +/- window_factor * HWHM around the reference center
+
+    Returns
+    -------
+    results : dict with keys
+        'peak_q_ref'  : (Npeaks,) reference q positions
+        'centers'     : (Npeaks, Nimg) fitted centers
+        'sigmas'      : (Npeaks, Nimg)
+        'amps'        : (Npeaks, Nimg)
+        'offsets'     : (Npeaks, Nimg)
+        'center_err'  : (Npeaks, Nimg) 1-sigma uncertainty on center
+    """
+    if I_stack.shape[0] != q.size:
+        raise ValueError(f"I_stack first axis ({I_stack.shape[0]}) must match q ({q.size}).")
+
+    # Build reference pattern
+    if ref == "first":
+        I_ref = I_stack[:, 0]
+    elif ref == "mean":
+        I_ref = np.nanmean(I_stack, axis=1)
+    elif isinstance(ref, (int, np.integer)):
+        I_ref = I_stack[:, ref]
+    else:
+        raise ValueError("ref must be 'first', 'mean', or an int index.")
+
+    # Detect peaks on reference
+    _, peak_q, half_widths = detect_peaks(
+        q, I_ref, height=height, prominence=prominence,
+        distance=distance, width=width,
+    )
+    Npeaks = peak_q.size
+    Nimg = I_stack.shape[1]
+    print(f"Detected {Npeaks} peak(s) at q = {peak_q}")
+
+    centers = np.full((Npeaks, Nimg), np.nan)
+    sigmas  = np.full((Npeaks, Nimg), np.nan)
+    amps    = np.full((Npeaks, Nimg), np.nan)
+    offsets = np.full((Npeaks, Nimg), np.nan)
+    cerr    = np.full((Npeaks, Nimg), np.nan)
+
+    for k, (q0, hw) in enumerate(zip(peak_q, half_widths)):
+        for j in range(Nimg):
+            popt, perr = fit_one_peak(q, I_stack[:, j], q0, hw, window_factor)
+            amps[k, j], centers[k, j], sigmas[k, j], offsets[k, j] = popt
+            cerr[k, j] = perr[1]
+
+    return {
+        "peak_q_ref": peak_q,
+        "centers":    centers,
+        "sigmas":     sigmas,
+        "amps":       amps,
+        "offsets":    offsets,
+        "center_err": cerr,
+    }
+
+
+# ---------- visualization ----------
+
+def plot_drift(results, image_numbers=None, relative=True):
+    """
+    Plot peak centers vs image number.
+    relative=True plots (center - center[0]) so multiple peaks share an axis.
+    """
+    centers = results["centers"]
+    cerr    = results["center_err"]
+    qref    = results["peak_q_ref"]
+    Npeaks, Nimg = centers.shape
+
+    if image_numbers is None:
+        image_numbers = np.arange(Nimg)
+
+    fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+
+    for k in range(Npeaks):
+        y = centers[k] - centers[k, 0] if relative else centers[k]
+        axes[0].errorbar(image_numbers, y, yerr=cerr[k],
+                         label=f"peak @ q≈{qref[k]:.3f}", lw=1, capsize=2)
+        axes[1].plot(image_numbers, results["amps"][k],
+                     label=f"peak @ q≈{qref[k]:.3f}", lw=1)
+
+    ylabel0 = "Δq center" if relative else "q center"
+    axes[0].set_ylabel(ylabel0)
+    axes[0].axhline(0 if relative else qref[0], color="k", lw=0.5, ls="--")
+    axes[0].legend(fontsize=8)
+    axes[0].set_title("Peak drift vs image number")
+
+    axes[1].set_ylabel("amplitude")
+    axes[1].set_xlabel("image number")
+    axes[1].legend(fontsize=8)
+
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_diagnostics(results, image_numbers=None, topup_images=None):
+    """
+    Diagnostic plots to disambiguate:
+      (1) scale drift vs rigid translation         -> Δq/q_ref collapse
+      (2) real intensity loss vs peak broadening   -> integrated intensity vs amplitude
+      (3) damage-induced broadening                -> sigma vs image number
+
+    Parameters
+    ----------
+    results       : dict from track_peaks()
+    image_numbers : optional array, defaults to arange(Nimg)
+    topup_images  : optional list of image indices where top-up occurred,
+                    drawn as vertical guides
+    """
+    centers = results["centers"]
+    amps    = results["amps"]
+    sigmas  = results["sigmas"]
+    qref    = results["peak_q_ref"]
+    Npeaks, Nimg = centers.shape
+
+    if image_numbers is None:
+        image_numbers = np.arange(Nimg)
+
+    # Integrated intensity of a Gaussian: A * sigma * sqrt(2*pi)
+    integ = amps * sigmas * np.sqrt(2 * np.pi)
+
+    # Δq / q_ref for scale-drift collapse test
+    dq = centers - centers[:, [0]]
+    dq_over_q = dq / qref[:, None]
+
+    # Normalize each metric to its first-image value so peaks share a y-axis
+    amps_norm   = amps   / amps[:, [0]]
+    integ_norm  = integ  / integ[:, [0]]
+    sigmas_norm = sigmas / sigmas[:, [0]]
+
+    fig, axes = plt.subplots(4, 1, figsize=(9, 12), sharex=True)
+
+    def _decorate(ax):
+        if topup_images is not None:
+            for ti in topup_images:
+                ax.axvline(ti, color="gray", lw=0.8, ls=":", alpha=0.7)
+
+    # (1) Δq/q_ref — should collapse for pure scale drift
+    for k in range(Npeaks):
+        axes[0].plot(image_numbers, dq_over_q[k],
+                     label=f"q≈{qref[k]:.3f}", lw=1)
+    axes[0].set_ylabel(r"$\Delta q / q_{\mathrm{ref}}$")
+    axes[0].set_title("Scale-drift test: curves collapse → multiplicative scale; spread → translation/mixed")
+    axes[0].axhline(0, color="k", lw=0.5, ls="--")
+    axes[0].legend(fontsize=7, ncol=2)
+    _decorate(axes[0])
+
+    # (2) Amplitude vs integrated intensity (normalized) — overlaid per peak
+    # Plot amplitude as solid, integrated as dashed, same color per peak
+    cmap = plt.get_cmap("tab10")
+    for k in range(Npeaks):
+        c = cmap(k % 10)
+        axes[1].plot(image_numbers, amps_norm[k],  color=c, lw=1,
+                     label=f"amp q≈{qref[k]:.3f}")
+        axes[1].plot(image_numbers, integ_norm[k], color=c, lw=1, ls="--")
+    axes[1].set_ylabel("normalized\n(solid: amp, dashed: integ.)")
+    axes[1].set_title("Broadening test: if dashed is flatter than solid → amplitude drop is broadening, not lost signal")
+    axes[1].axhline(1, color="k", lw=0.5, ls="--")
+    axes[1].legend(fontsize=7, ncol=2)
+    _decorate(axes[1])
+
+    # (3) Sigma (peak width) vs image number — direct broadening readout
+    for k in range(Npeaks):
+        axes[2].plot(image_numbers, sigmas_norm[k],
+                     label=f"q≈{qref[k]:.3f}", lw=1)
+    axes[2].set_ylabel(r"$\sigma / \sigma_0$")
+    axes[2].set_title("Peak width drift (>1 → broadening)")
+    axes[2].axhline(1, color="k", lw=0.5, ls="--")
+    axes[2].legend(fontsize=7, ncol=2)
+    _decorate(axes[2])
+
+    # (4) Mean Δq/q across peaks ± std — single-number scale drift summary
+    mean_scale = dq_over_q.mean(axis=0)
+    std_scale  = dq_over_q.std(axis=0)
+    axes[3].plot(image_numbers, mean_scale, color="k", lw=1.2, label="mean Δq/q")
+    axes[3].fill_between(image_numbers,
+                         mean_scale - std_scale, mean_scale + std_scale,
+                         alpha=0.25, color="k", label="±1σ across peaks")
+    axes[3].set_ylabel(r"$\langle \Delta q / q \rangle$")
+    axes[3].set_xlabel("image number")
+    axes[3].set_title("Average scale drift (use this as the per-image correction factor)")
+    axes[3].axhline(0, color="k", lw=0.5, ls="--")
+    axes[3].legend(fontsize=8)
+    _decorate(axes[3])
+
+    fig.tight_layout()
+    return fig, axes
+
+
+def scale_drift_factor(results):
+    """
+    Return per-image scale factor s(j) such that
+        q_corrected(j) = q / (1 + s(j))
+    will (approximately) realign all peaks to their reference positions.
+
+    s(j) is the weighted mean of Δq/q_ref across peaks, weighted by 1/center_err^2.
+    """
+    centers = results["centers"]
+    cerr    = results["center_err"]
+    qref    = results["peak_q_ref"]
+
+    dq_over_q = (centers - centers[:, [0]]) / qref[:, None]
+    weights = 1.0 / np.where(cerr > 0, cerr**2, np.nan)
+    weights = weights / qref[:, None]**2  # propagate to Δq/q
+
+    # Weighted mean across peaks, image by image
+    s = np.nansum(dq_over_q * weights, axis=0) / np.nansum(weights, axis=0)
+    return s
+
+
+def apply_scale_correction(q, I_stack, scale_factors, q_ref=None,
+                           exclude_edges=True, kind="cubic",
+                           fill_value=np.nan):
+    """
+    Apply a per-image multiplicative q-axis correction and resample onto a
+    common q grid.
+
+    Model: image j was measured on an effective q-axis q_measured = q_true * (1 + s_j).
+    Correction: q_true_j = q / (1 + s_j), then interpolate I onto q_ref.
+
+    Parameters
+    ----------
+    q             : (Nq,) measured q axis (assumed common to all images as recorded)
+    I_stack       : (Nq, Nimg) intensity stack
+    scale_factors : (Nimg,) per-image scale factor s_j from scale_drift_factor()
+    q_ref         : (Nq_out,) reference q grid to resample onto.
+                    If None, uses the original q (safe default).
+    exclude_edges : if True, trims q_ref to a range valid for ALL images
+                    (avoids extrapolation at any image).
+    kind          : interp1d kind; 'cubic' is smooth, 'linear' is robust.
+    fill_value    : value for any q_ref point outside an image's corrected range.
+
+    Returns
+    -------
+    q_out      : (Nq_out,) common q axis (possibly trimmed)
+    I_corr     : (Nq_out, Nimg) corrected intensity stack
+    """
+    Nq, Nimg = I_stack.shape
+    if scale_factors.size != Nimg:
+        raise ValueError("scale_factors length must match number of images.")
+
+    if q_ref is None:
+        q_ref = q.copy()
+
+    s = scale_factors
+    qmin_per_img = q.min() / (1 + s)
+    qmax_per_img = q.max() / (1 + s)
+    global_qmin = qmin_per_img.max()
+    global_qmax = qmax_per_img.min()
+
+    if exclude_edges:
+        mask_ref = (q_ref >= global_qmin) & (q_ref <= global_qmax)
+        q_out = q_ref[mask_ref]
+    else:
+        q_out = q_ref
+
+    I_corr = np.full((q_out.size, Nimg), fill_value, dtype=float)
+
+    for j in range(Nimg):
+        finite = np.isfinite(I_stack[:, j])
+        if finite.sum() < 4:   # cubic needs at least 4 points
+            continue
+
+        q_true_j = q[finite] / (1 + s[j])
+        I_j      = I_stack[finite, j]
+
+        order = np.argsort(q_true_j)
+        f = interp1d(q_true_j[order], I_j[order],
+                     kind=kind, bounds_error=False, fill_value=fill_value,
+                     assume_sorted=True)
+
+        # Only fill q_out points that fall inside this image's finite range —
+        # otherwise we'd extrapolate across the beamstop gap
+        in_range = (q_out >= q_true_j.min()) & (q_out <= q_true_j.max())
+        I_corr[in_range, j] = f(q_out[in_range])
+
+        # Propagate NaN gaps: if there's an internal gap in finite data
+        # (not just at edges), mark q_out points falling in the gap as NaN.
+        # Detect gaps as places where consecutive finite q points are spaced
+        # much wider than the typical step.
+        q_finite_sorted = q_true_j[order]
+        gaps = np.diff(q_finite_sorted)
+        typical = np.median(gaps)
+        big_gaps = np.where(gaps > 3 * typical)[0]
+        for g in big_gaps:
+            gap_lo, gap_hi = q_finite_sorted[g], q_finite_sorted[g + 1]
+            in_gap = (q_out > gap_lo) & (q_out < gap_hi)
+            I_corr[in_gap, j] = np.nan
+
+    trimmed = q_ref.size - q_out.size
+    if trimmed > 0:
+        print(f"Trimmed {trimmed} q points to avoid extrapolation.")
+        print(f"Output q range: [{q_out.min():.4f}, {q_out.max():.4f}]")
+
+    return q_out, I_corr
+
+
+def verify_correction(q_corr, I_corr, results_original, track_peaks_fn,
+                      prominence=None, distance=None):
+    """
+    Re-run peak tracking on corrected data and compare residual drift.
+
+    Parameters
+    ----------
+    q_corr, I_corr      : output of apply_scale_correction
+    results_original    : dict from original track_peaks() call (for comparison)
+    track_peaks_fn      : reference to your track_peaks function
+    prominence, distance: same find_peaks kwargs you used originally
+
+    Returns
+    -------
+    results_corr : dict from track_peaks on corrected data
+    summary      : dict with before/after drift statistics
+    """
+    results_corr = track_peaks_fn(
+        q_corr, I_corr,
+        ref="mean", prominence=prominence, distance=distance,
+    )
+
+    # Compare peak-by-peak drift magnitude
+    def drift_stats(results):
+        centers = results["centers"]
+        qref = results["peak_q_ref"]
+        # Use Δq/q_ref so peaks are comparable
+        dq_over_q = (centers - centers[:, [0]]) / qref[:, None]
+        # Robust drift magnitude: range of the smoothed curve
+        return {
+            "peak_q":    qref,
+            "drift_pp":  dq_over_q.max(axis=1) - dq_over_q.min(axis=1),
+            "drift_std": dq_over_q.std(axis=1),
+        }
+
+    before = drift_stats(results_original)
+    after  = drift_stats(results_corr)
+
+    print(f"{'Peak q':>10s}  {'Before (pp)':>14s}  {'After (pp)':>14s}  {'Reduction':>10s}")
+    print("-" * 55)
+    for k in range(before["peak_q"].size):
+        # Match peaks by closest q (in case detection finds slightly different ones)
+        ka = np.argmin(np.abs(after["peak_q"] - before["peak_q"][k]))
+        b = before["drift_pp"][k]
+        a = after["drift_pp"][ka]
+        red = (1 - a / b) * 100 if b > 0 else 0
+        print(f"{before['peak_q'][k]:10.3f}  {b:14.2e}  {a:14.2e}  {red:9.1f}%")
+
+    return results_corr, {"before": before, "after": after}
