@@ -23,10 +23,10 @@ import trxrd
 # ============================================================
 DATA_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BTO400_S3") # Path to directory containing TIFF files
 MASK_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\TRXRDPython\testdata\mask_2021_dec.tif") # Path to mask file
-SCAN_NAME = "BTO400nmS3_285Ksurv2" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
+SCAN_NAME = "BTO400nmS3_285Khalfpow2" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
 SCAN_TYPE = "delay_scan" # Type of scan based on filename pattern, e.g. "delay_scan", "theta_samz", etc. Must correspond to a key in the "filename_patterns" dictionary in trxrd.py
 BACKGROUND_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BlankSubstratePinkBeam\blanksubstratePinkBeam-1.0fshw-4e-09delay00004_020.tif")
-SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Ksurv2") # Path to directory where processed data will be saved, e.g. as .h5 file
+SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Khalfpow2") # Path to directory where processed data will be saved, e.g. as .h5 file
 # PONI file from pyFAI-calib2. Set to a Path to use PONI geometry;
 # set to None to use the manual parameters below.
 PONI_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\CeO2\poni_files\CeO2_calib_poni.poni") # Path to .poni file, or None
