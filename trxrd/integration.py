@@ -1,8 +1,10 @@
 import concurrent.futures
+from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
 import pyFAI
+import tifffile as tf
 from pyFAI.integrator.azimuthal import AzimuthalIntegrator
 
 from globals import (
@@ -12,9 +14,9 @@ from globals import (
     TILT_ANGLE, TILT_PLANE_ROTATION, ROT3,
     POLARIZATION_FACTOR, DARK, FLAT,
     UNIT, NAN_MIN, NAN_MAX, N_POINTS,
-    MAX_PROCESSORS, PONI_FILE,
+    MAX_PROCESSORS, PONI_FILE, DELAY_SIGN,
 )
-from trxrd.io import _as_image_stack, _restore_image_dimensionality
+from trxrd.io import _as_image_stack, _restore_image_dimensionality, _parse_filename_flexible
 from trxrd.masking import build_pyfai_mask
 
 
@@ -1155,3 +1157,438 @@ def azimuthal_anisotropy(I_qchi):
     std_q = np.nanstd(I_qchi, axis=0)
     rel_std_q = std_q / mean_q
     return mean_q, std_q, rel_std_q
+
+
+# ---------------------------------------------------------------------------
+# Streaming integration (read + integrate per image, no full stack in memory)
+# ---------------------------------------------------------------------------
+
+def _streaming_azimuthal_worker(
+    idx,
+    file_path,
+    center_xy,
+    npt,
+    unit,
+    radial_range,
+    nan_radial_range,
+    azimuth_range,
+    mask,
+    dark,
+    flat,
+    polarization_factor,
+    method,
+    pixel1,
+    pixel2,
+    distance,
+    wavelength,
+    tilt_angle,
+    tilt_plane_rotation,
+    rot3,
+    error_mode,
+    poni_path=None,
+    use_custom_polarization=False,
+    integration_function="integrate1d",
+    correct_solid_angle=False,
+):
+    """Read one TIFF file, compute total counts, then azimuthally integrate it."""
+    try:
+        image = tf.imread(str(file_path)).astype(float)
+        if image.ndim != 2:
+            raise ValueError(f"Expected 2D image, got shape {image.shape} from {file_path}")
+    except Exception as exc:
+        msg = f"Failed to read image index {idx} ({file_path}): {exc}"
+        if error_mode == "raise":
+            raise RuntimeError(msg) from exc
+        elif error_mode == "warn":
+            print(f"Warning: {msg}")
+        return {"index": idx, "radial": None, "intensity": None, "success": False, "error": msg, "counts": 0.0}
+
+    counts = float(np.nansum(image))
+
+    result = _azimuthal_worker(
+        idx=idx,
+        image=image,
+        center_xy=center_xy,
+        npt=npt,
+        unit=unit,
+        radial_range=radial_range,
+        nan_radial_range=nan_radial_range,
+        azimuth_range=azimuth_range,
+        mask=mask,
+        dark=dark,
+        flat=flat,
+        polarization_factor=polarization_factor,
+        method=method,
+        pixel1=pixel1,
+        pixel2=pixel2,
+        distance=distance,
+        wavelength=wavelength,
+        tilt_angle=tilt_angle,
+        tilt_plane_rotation=tilt_plane_rotation,
+        rot3=rot3,
+        error_mode=error_mode,
+        poni_path=poni_path,
+        use_custom_polarization=use_custom_polarization,
+        integration_function=integration_function,
+        correct_solid_angle=correct_solid_angle,
+    )
+    result["counts"] = counts
+    return result
+
+
+def get_azimuthal_average_for_image(
+    folder_path,
+    sample_name=None,
+    filename_scheme="delay_scan",
+    sort=True,
+    sort_key="image_number",
+    filter_data=False,
+    delay_sign=DELAY_SIGN,
+    centers_xy=None,
+    poni_path=PONI_FILE,
+    use_average_center=False,
+    npt=N_POINTS,
+    unit=UNIT,
+    radial_range=None,
+    nan_radial_range=(NAN_MIN, NAN_MAX),
+    azimuth_range=None,
+    integration_mask=None,
+    dark=DARK,
+    flat=FLAT,
+    polarization_factor=POLARIZATION_FACTOR,
+    method=("bbox", "csr", "cython"),
+    pixel1=PIXEL1,
+    pixel2=PIXEL2,
+    distance=DISTANCE,
+    wavelength=WAVELENGTH,
+    tilt_angle=TILT_ANGLE,
+    tilt_plane_rotation=TILT_PLANE_ROTATION,
+    rot3=ROT3,
+    error_mode="raise",
+    max_workers=None,
+    progress_interval=100,
+    use_custom_polarization=False,
+    integration_function="integrate1d",
+    correct_solid_angle=False,
+    plot=False,
+):
+    """
+    Parse filename metadata and azimuthally integrate images in a folder,
+    reading and discarding one image at a time to minimise memory use.
+
+    This combines the metadata parsing of ``get_image_details`` with the
+    integration of ``azimuthal_average_pyfai``. Raw images are never held
+    in memory simultaneously — each worker reads one file, integrates it,
+    and releases it before the next one starts.
+
+    Parameters
+    ----------
+    folder_path : str or Path
+        Folder containing TIFF files.
+    sample_name : str or None
+        If provided, only load files whose names start with this prefix.
+    filename_scheme : str
+        Key from FILENAME_PATTERNS (e.g. "delay_scan", "theta_samz").
+    sort : bool
+        Sort files by sort_key before integrating.
+    sort_key : str
+        Metadata field to sort by (e.g. "image_number", "delay").
+    filter_data : bool or list-like
+        If False, use all files. If [min_index, max_index], keep that slice.
+    delay_sign : float
+        Multiplier applied to parsed delay values.
+    centers_xy : tuple or np.ndarray or None
+        Center(s) in (x, y) pixel coordinates. Required when poni_path is None.
+    poni_path : path-like or None
+        Path to a .poni file. When supplied the PONI geometry is used and
+        manual detector parameters are ignored.
+    use_average_center : bool
+        If True and per-image centers are supplied, average them first.
+    npt : int
+        Number of radial bins.
+    unit : str
+        Radial unit for pyFAI (e.g. "q_A^-1").
+    radial_range : tuple or None
+        Range passed to pyFAI.integrate1d — truncates the output.
+    nan_radial_range : tuple or None
+        Radial range to keep; values outside are set to NaN.
+    azimuth_range : tuple or None
+        Azimuthal range passed to pyFAI.
+    integration_mask : np.ndarray or None
+        Boolean mask where True means excluded pixel.
+    dark, flat : np.ndarray or None
+        Dark and flat-field correction images.
+    polarization_factor : float or None
+        Polarization correction factor.
+    method : str or tuple
+        pyFAI integration method.
+    pixel1, pixel2 : float
+        Pixel sizes in metres.
+    distance : float
+        Sample-to-detector distance in metres.
+    wavelength : float
+        Beam wavelength in metres.
+    tilt_angle, tilt_plane_rotation, rot3 : float
+        Detector geometry parameters in radians.
+    error_mode : {"raise", "warn", "ignore"}
+        How to handle per-image integration failures.
+    max_workers : int or None
+        Thread-pool size. None lets Python choose.
+    progress_interval : int
+        Print a progress line every this many completed images.
+    use_custom_polarization : bool
+        Apply notebook-style 2D polarization map before integration.
+    integration_function : {"integrate1d", "integrate1d_ng"}
+        Which pyFAI 1D integrator to use.
+    correct_solid_angle : bool
+        Apply pyFAI solid-angle correction.
+    plot : bool
+        If True, plot total counts per image after integration.
+
+    Returns
+    -------
+    dict
+        Contains all filename-parsed metadata fields (delay, image_number,
+        fluence, sample_name, etc.), plus:
+
+        radial       : np.ndarray, shape (npt,)
+        profiles     : np.ndarray, shape (n_images, npt)
+        counts       : np.ndarray, shape (n_images,)
+        file_names   : np.ndarray of str
+        centers_used_xy : np.ndarray, shape (n_images, 2)
+        centers_used_yx : np.ndarray, shape (n_images, 2)
+        success      : np.ndarray of bool
+        geometry     : dict
+        unit         : str
+        radial_range : as supplied
+        nan_radial_range : as supplied
+    """
+    folder = Path(folder_path)
+
+    if not folder.exists():
+        raise ValueError(f"Folder does not exist: {folder}")
+    if not folder.is_dir():
+        raise ValueError(f"Path is not a directory: {folder}")
+
+    # --- File discovery and metadata parsing (mirrors get_image_details) ---
+    if sample_name is not None:
+        file_names = sorted(folder.glob(f"{sample_name}-*.tif"))
+    else:
+        file_names = sorted(folder.glob("*.tif"))
+
+    print(
+        f"{len(file_names)} TIFF files found in {folder}"
+        + (f" with scan name {sample_name}." if sample_name else ".")
+    )
+
+    if len(file_names) == 0:
+        raise ValueError(f"No .tif files found in folder: {folder}")
+
+    metadata = []
+    cleaned_files = []
+
+    for file_name in file_names:
+        try:
+            meta = _parse_filename_flexible(file_name, scheme=filename_scheme)
+        except ValueError:
+            continue
+
+        if sample_name is not None:
+            if not Path(file_name).name.lower().startswith(sample_name.lower()):
+                continue
+
+        metadata.append(meta)
+        cleaned_files.append(str(file_name))
+
+    if len(metadata) == 0:
+        raise ValueError(
+            f"No TIFF files matched filename_scheme='{filename_scheme}'"
+            + (f" and sample_name='{sample_name}'." if sample_name is not None else ".")
+        )
+
+    all_keys = set()
+    for meta in metadata:
+        all_keys.update(meta.keys())
+
+    meta_arrays = {}
+    for key in all_keys:
+        values = [meta.get(key, np.nan) for meta in metadata]
+        if key in ["sample_name", "file_name"]:
+            meta_arrays[key] = np.array(values, dtype=str)
+        else:
+            meta_arrays[key] = np.array(values)
+
+    cleaned_files = np.array(cleaned_files, dtype=str)
+
+    if "delay" in meta_arrays:
+        meta_arrays["delay"] = delay_sign * meta_arrays["delay"].astype(float)
+
+    if sort:
+        if sort_key in meta_arrays:
+            idx_sort = np.argsort(meta_arrays[sort_key])
+        elif "image_number" in meta_arrays:
+            idx_sort = np.argsort(meta_arrays["image_number"])
+        else:
+            idx_sort = np.arange(len(cleaned_files))
+
+        for key in meta_arrays:
+            meta_arrays[key] = meta_arrays[key][idx_sort]
+        cleaned_files = cleaned_files[idx_sort]
+
+    if isinstance(filter_data, (list, tuple, np.ndarray)):
+        if len(filter_data) != 2:
+            raise ValueError("filter_data must be False or [min_index, max_index].")
+        min_val, max_val = filter_data
+        if min_val < 0 or max_val > len(cleaned_files):
+            raise ValueError("filter_data range is out of bounds.")
+        for key in meta_arrays:
+            meta_arrays[key] = meta_arrays[key][min_val:max_val]
+        cleaned_files = cleaned_files[min_val:max_val]
+
+    n_images = len(cleaned_files)
+
+    # --- Center setup (mirrors azimuthal_average_pyfai) ---
+    if poni_path is not None and centers_xy is None:
+        _ai_ref = pyFAI.load(str(poni_path))
+        cx = _ai_ref.poni2 / _ai_ref.pixel2
+        cy = _ai_ref.poni1 / _ai_ref.pixel1
+        centers_xy = np.array([cx, cy])
+    elif centers_xy is None:
+        raise ValueError("Either poni_path or centers_xy must be provided.")
+
+    centers_used_xy = _normalize_centers_xy(
+        centers_xy,
+        n_images=n_images,
+        use_average_center=use_average_center,
+    )
+
+    if integration_mask is not None:
+        integration_mask = np.asarray(integration_mask, dtype=bool)
+
+    rot1_used, rot2_used, rot3_used = tilt_to_rotations(
+        tilt_angle=tilt_angle,
+        tilt_plane_rotation=tilt_plane_rotation,
+        rot3=rot3,
+    )
+
+    # --- Streaming parallel integration ---
+    print(f"Integrating {n_images} images (streaming)...")
+
+    profiles = np.full((n_images, npt), np.nan, dtype=float)
+    counts = np.zeros(n_images, dtype=float)
+    success = np.zeros(n_images, dtype=bool)
+    radial_out = None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(
+                _streaming_azimuthal_worker,
+                idx=idx,
+                file_path=cleaned_files[idx],
+                center_xy=centers_used_xy[idx],
+                npt=npt,
+                unit=unit,
+                radial_range=radial_range,
+                nan_radial_range=nan_radial_range,
+                azimuth_range=azimuth_range,
+                mask=integration_mask,
+                dark=dark,
+                flat=flat,
+                polarization_factor=polarization_factor,
+                method=method,
+                pixel1=pixel1,
+                pixel2=pixel2,
+                distance=distance,
+                wavelength=wavelength,
+                tilt_angle=tilt_angle,
+                tilt_plane_rotation=tilt_plane_rotation,
+                rot3=rot3,
+                error_mode=error_mode,
+                poni_path=poni_path,
+                use_custom_polarization=use_custom_polarization,
+                integration_function=integration_function,
+                correct_solid_angle=correct_solid_angle,
+            ): idx
+            for idx in range(n_images)
+        }
+
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_idx):
+            result = future.result()
+            i = result["index"]
+            counts[i] = result["counts"]
+            if result["success"]:
+                profiles[i, :] = result["intensity"]
+                success[i] = True
+                if radial_out is None:
+                    radial_out = result["radial"]
+            completed += 1
+            if completed % progress_interval == 0 or completed == n_images:
+                print(f"  Completed {completed}/{n_images} ({100 * completed / n_images:.1f}%)")
+
+    print("Done integrating.")
+
+    if radial_out is None:
+        radial_out = np.full(npt, np.nan)
+
+    _UNIT_LABELS = {
+        "q_A^-1": r"Q ($\AA^{-1}$)",
+        "2th_deg": r"2$\theta$ (°)",
+        "2th_rad": r"2$\theta$ (rad)",
+        "r_mm": "r (mm)",
+    }
+
+    if plot:
+        plt.figure(figsize=FIGSIZE)
+        plt.plot(counts, "o-")
+        plt.xlabel("Image index")
+        plt.ylabel("Counts")
+        plt.title("Total Counts")
+        plt.tight_layout()
+        plt.show()
+
+        first_success = np.where(success)[0]
+        if len(first_success) > 0:
+            idx_ex = first_success[0]
+            xlabel = _UNIT_LABELS.get(unit, unit)
+            plt.figure(figsize=FIGSIZE)
+            plt.plot(radial_out, profiles[idx_ex])
+            plt.xlabel(xlabel)
+            plt.ylabel("Intensity")
+            plt.title(f"Example Azimuthal Profile (image index {idx_ex})")
+            plt.tight_layout()
+            plt.show()
+
+    geometry = {
+        "poni_path": str(poni_path) if poni_path is not None else None,
+        "pixel1": pixel1,
+        "pixel2": pixel2,
+        "distance": distance,
+        "wavelength": wavelength,
+        "tilt_angle": tilt_angle,
+        "tilt_plane_rotation": tilt_plane_rotation,
+        "rot1": rot1_used,
+        "rot2": rot2_used,
+        "rot3": rot3_used,
+        "polarization_factor": polarization_factor,
+        "use_custom_polarization": use_custom_polarization,
+        "integration_function": integration_function,
+        "correct_solid_angle": correct_solid_angle,
+    }
+
+    data_dict = {
+        "radial": radial_out,
+        "profiles": profiles,
+        "counts": counts,
+        "file_names": cleaned_files,
+        "centers_used_xy": centers_used_xy,
+        "centers_used_yx": np.column_stack((centers_used_xy[:, 1], centers_used_xy[:, 0])),
+        "success": success,
+        "geometry": geometry,
+        "unit": unit,
+        "radial_range": radial_range,
+        "nan_radial_range": nan_radial_range,
+    }
+    data_dict.update(meta_arrays)
+
+    return data_dict

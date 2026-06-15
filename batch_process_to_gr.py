@@ -13,9 +13,9 @@ from diffpy.pdfgetx import PDFGetter
 # ============================================================
 # Paths and scan identification
 # ============================================================
-DAT_PATH   = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Ksurv2")  # Path to directory containing .dat files
-SCAN_NAME  = "BTO400nmS3_285Ksurv2"   # filename prefix; set None to load all .dat files
-SAVE_PATH  = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Ksurv2\output")  # Path to directory where output files will be saved
+DAT_PATH   = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Khalfpow2")  # Path to directory containing .dat files
+SCAN_NAME  = "BTO400nmS3_285Khalfpow2"   # filename prefix; set None to load all .dat files
+SAVE_PATH  = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Khalfpow2\output")  # Path to directory where output files will be saved
 
 # Optional: path to a pdfgetx3.cfg file produced by PDFgetX3.
 # When provided, all PDF parameters below are ignored.
@@ -42,7 +42,7 @@ OUTPUTTYPES = ["gr"]   # any subset of ["gr", "fq", "sq", "iq"]
 # Background subtraction (optional)
 # ============================================================
 BGFILE  = f"{DAT_PATH}/BaTiO3_background.dat"   # Path to background .dat file, or None
-BGSCALE = 0.85  # scale factor applied to background before subtraction
+BGSCALE = 0.997  # scale factor applied to background before subtraction
 
 # ============================================================
 # Helper: read a .dat file, skipping non-numeric lines

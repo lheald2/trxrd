@@ -178,7 +178,7 @@ def remove_counts(
     # Initial counts-based filtering
     # ------------------------------------------------------------
     counts_mean_initial = np.nanmean(counts)
-    counts_std_initial = np.nanstd(counts)
+    counts_std_initial = np.nanstd(counts, ddof=1)
 
     lower_threshold = counts_mean_initial - std_factor * counts_std_initial
     upper_threshold = counts_mean_initial + std_factor * counts_std_initial
@@ -375,7 +375,7 @@ def average_images_by_delay(
 
         group = images[idx]
         mean_images.append(np.nanmean(group, axis=0))
-        std_images.append(np.nanstd(group, axis=0))
+        std_images.append(np.nanstd(group, axis=0, ddof=1))
 
         if "file_names" in data_dict:
             grouped_file_names[delay_val] = data_dict["file_names"][idx]
@@ -470,7 +470,7 @@ def remove_xrays(
         working_stack[:, mask_bool] = np.nan
 
     mean_image = np.nanmean(working_stack, axis=0)
-    std_image = np.nanstd(working_stack, axis=0)
+    std_image = np.nanstd(working_stack, axis=0, ddof=1)
 
     print(f"Removing hot pixels from {n_images} image(s)...")
 
@@ -609,7 +609,7 @@ def remove_xrays_pool(
         working_stack[:, mask_bool] = np.nan
 
     mean_image = np.nanmean(working_stack, axis=0)
-    std_image = np.nanstd(working_stack, axis=0)
+    std_image = np.nanstd(working_stack, axis=0, ddof=1)
 
     print(f"Removing hot pixels from {n_images} image(s)...")
 
@@ -687,6 +687,7 @@ def average_profiles_by_delay(
     delays,
     unique_delays=None,
     return_dict=True,
+    verbose=True,
 ):
     """
     Group 1D scattering profiles by delay and compute average profile
@@ -751,7 +752,11 @@ def average_profiles_by_delay(
 
         group = profiles[idx]
         mean_profiles[i] = np.nanmean(group, axis=0)
-        std_profiles[i] = np.nanstd(group, axis=0)
+        std_profiles[i] = np.nanstd(group, axis=0, ddof=1)
+
+        counts_per_delay[i] = len(idx)
+        if verbose:
+            print(f"Delay {delay_val}: {len(idx)} profiles averaged")
 
     if return_dict:
         return {
@@ -827,7 +832,7 @@ def make_reference_profile(
 
     ref_group = profiles[reference_mask]
     reference_profile = np.nanmean(ref_group, axis=0)
-    reference_std = np.nanstd(ref_group, axis=0)
+    reference_std = np.nanstd(ref_group, axis=0, ddof=1)
 
     if return_dict:
         return {
@@ -1037,7 +1042,7 @@ def lineouts_by_delay_from_per_image_profiles(
 
         group = per_image_lineouts[:, idx]
         mean_lineouts[:, j] = np.nanmean(group, axis=1)
-        std_lineouts[:, j] = np.nanstd(group, axis=1)
+        std_lineouts[:, j] = np.nanstd(group, axis=1, ddof=1)
 
         if len(idx) > 0:
             sem_lineouts[:, j] = std_lineouts[:, j] / np.sqrt(len(idx))
@@ -1190,7 +1195,7 @@ def make_reference_gr(
 
     ref_group = grs[reference_mask]
     reference_gr = np.nanmean(ref_group, axis=0)
-    reference_std = np.nanstd(ref_group, axis=0)
+    reference_std = np.nanstd(ref_group, axis=0, ddof=1)
 
     if return_dict:
         return {
@@ -1379,7 +1384,7 @@ def average_delta_grs_by_delay(
 
         group = delta_grs[idx]
         mean_delta_grs.append(np.nanmean(group, axis=0))
-        std_delta_grs.append(np.nanstd(group, axis=0))
+        std_delta_grs.append(np.nanstd(group, axis=0, ddof=1))
 
         if "file_names" in data_dict:
             grouped_file_names[delay_val] = np.asarray(data_dict["file_names"])[idx]
@@ -1488,7 +1493,7 @@ def average_grs_by_temperature(
 
         group = grs[idx]
         mean_grs.append(np.nanmean(group, axis=0))
-        std_grs.append(np.nanstd(group, axis=0))
+        std_grs.append(np.nanstd(group, axis=0, ddof=1))
 
         if "file_names" in data_dict:
             grouped_file_names[temp_val] = np.asarray(data_dict["file_names"])[idx]
@@ -1593,7 +1598,7 @@ def average_iqs_by_temperature(
 
         group = iqs[idx]
         mean_iqs.append(np.nanmean(group, axis=0))
-        std_iqs.append(np.nanstd(group, axis=0))
+        std_iqs.append(np.nanstd(group, axis=0, ddof=1))
 
         if "file_names" in data_dict:
             grouped_file_names[temp_val] = np.asarray(data_dict["file_names"])[idx]

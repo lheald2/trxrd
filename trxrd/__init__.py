@@ -35,6 +35,7 @@ from trxrd.integration import (
     azimuthal_average_pyfai,
     get_polar_map,
     azimuthal_anisotropy,
+    get_azimuthal_average_for_image,
 )
 
 from trxrd.normalization import (

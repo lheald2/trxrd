@@ -13,6 +13,7 @@ specified output directory.
 
 from pathlib import Path
 import numpy as np
+import tifffile as tf
 
 import trxrd
 
@@ -23,10 +24,10 @@ import trxrd
 # ============================================================
 DATA_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BTO400_S3") # Path to directory containing TIFF files
 MASK_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\TRXRDPython\testdata\mask_2021_dec.tif") # Path to mask file
-SCAN_NAME = "BTO400nmS3_285Khalfpow2" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
+SCAN_NAME = "BTO400nmS3_240Ksurv3" # Prefix in file name to identify relevant files, e.g. "550nm_re" etc.
 SCAN_TYPE = "delay_scan" # Type of scan based on filename pattern, e.g. "delay_scan", "theta_samz", etc. Must correspond to a key in the "filename_patterns" dictionary in trxrd.py
 BACKGROUND_PATH = Path(r"\\s7data\beams46\7IDC\Cotts\2025_11Exp\BlankSubstratePinkBeam\blanksubstratePinkBeam-1.0fshw-4e-09delay00004_020.tif")
-SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_285Khalfpow2") # Path to directory where processed data will be saved, e.g. as .h5 file
+SAVE_PATH = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\BTO_31.2keV\BTO400nmS3_240Ksurv3") # Path to directory where processed data will be saved, e.g. as .h5 file
 # PONI file from pyFAI-calib2. Set to a Path to use PONI geometry;
 # set to None to use the manual parameters below.
 PONI_FILE = Path(r"C:\Users\lheald\Documents\Guzelturk_Lab\Cotts_Processed_Data\CeO2\poni_files\CeO2_calib_poni.poni") # Path to .poni file, or None
@@ -112,73 +113,74 @@ N_POINTS = 3000 # Number of points for azimuthal averaging, e.g. 3000 or None to
 #     plot=False,
 # )
 
-data_dict = trxrd.get_image_details(
-    folder_path=DATA_PATH,
-    sample_name=SCAN_NAME,
-    filename_scheme="delay_scan",
-    sort_key="image_number",
-    sort=True,
-    filter_data=False,
-    plot=False,
-)
+# data_dict = trxrd.get_image_details(
+#     folder_path=DATA_PATH,
+#     sample_name=SCAN_NAME,
+#     filename_scheme="delay_scan",
+#     sort_key="image_number",
+#     sort=True,
+#     filter_data=False,
+#     plot=False,
+# )
 
-print(data_dict.keys())
-print("Images shape:", data_dict["images"].shape)
-print("Counts shape:", data_dict["counts"].shape)
+# print(data_dict.keys())
+# print("Images shape:", data_dict["images"].shape)
+# print("Counts shape:", data_dict["counts"].shape)
+
+# ------------------------------------------------------------
+# Define File Paths
+# ------------------------------------------------------------
+# Main diffraction data folder
+data_path = DATA_PATH
+
+# Check number of files in folder 
+file_names = sorted(data_path.glob(f"{SCAN_NAME}-*.tif"))
+print(f"{len(file_names)} TIFF files found in {data_path}.")
+
+# Detector mask file
+mask_file = MASK_FILE
+print(f"Using mask file: {mask_file}")
+
+sample_files = sorted(DATA_PATH.glob(f"{SCAN_NAME}-*.tif"))
+sample_image = tf.imread(str(sample_files[0]))
+
 
 # ------------------------------------------------------------
 # Build Masks
 # ------------------------------------------------------------
-image_shape = data_dict["images"].shape[1:]   # (rows, cols)
-
 combined_mask = trxrd.build_combined_mask(
-    image_shape=image_shape,
-    center_xy=(MASK_CENTER_X, MASK_CENTER_Y),
-    radius=MASK_RADIUS,
+    sample_image.shape,
+    center_xy = (MASK_CENTER_X, MASK_CENTER_Y),
+    radius = MASK_RADIUS,
+    detector_mask=None,
     mask_path=MASK_FILE,
+    plot=False,
+    example_image=sample_image,
+)
+# ------------------------------------------------------------
+# Load Data and Compute azimuthal average
+# ------------------------------------------------------------
+az_result = trxrd.get_azimuthal_average_for_image(
+    folder_path=DATA_PATH,
+    sample_name=SCAN_NAME,
+    filename_scheme=SCAN_TYPE,
+    sort_key="image_number",
+    delay_sign=DELAY_SIGN,
+    poni_path=PONI_FILE,          # handles geometry; set to None and pass centers_xy if using manual geometry
+    npt=N_POINTS,
+    unit=UNIT,
+    nan_radial_range=(NAN_MIN, NAN_MAX),
+    integration_mask=combined_mask,
+    max_workers=MAX_PROCESSORS,
+    progress_interval=100,
+    plot=True,                    # plots counts vs image index
 )
 
-# ------------------------------------------------------------
-# Compute azimuthal average
-# ------------------------------------------------------------
-if PONI_FILE is not None:
-    print(f"Using PONI geometry from: {PONI_FILE}")
-    az_result = trxrd.azimuthal_average_pyfai(
-        images=data_dict["images"],
-        poni_path=PONI_FILE,
-        npt=N_POINTS,
-        unit=UNIT,
-        nan_radial_range=(NAN_MIN, NAN_MAX),   # set Q < 0.3 to NaN
-        azimuth_range=None,
-        integration_mask=combined_mask,
-        return_dict=True,
-        progress_interval=100,
-        use_custom_polarization=False,
-        integration_function="integrate1d",
-        correct_solid_angle=False,
-        method=("bbox", "csr", "cython")
-    )
-else:
-    az_result = trxrd.azimuthal_average_pyfai(
-        images=data_dict["images"],
-        centers_xy=(CENTER_X, CENTER_Y),   # note: (x, y)
-        polarization_factor=POLARIZATION_FACTOR,
-        npt=N_POINTS,
-        unit=UNIT,
-        nan_radial_range=(NAN_MIN, NAN_MAX),   # set Q < 0.3 to NaN
-        azimuth_range=None,
-        integration_mask=combined_mask,
-        return_dict=True,
-        progress_interval=100,
-        use_custom_polarization=False,
-        integration_function="integrate1d",
-        correct_solid_angle=False,
-        method=("bbox", "csr", "cython")
-    )
-
-q = az_result["radial"]
-profiles = az_result["profiles"]
-
+q         = az_result["radial"]
+profiles  = az_result["profiles"]
+delays    = az_result["delay"]
+counts    = az_result["counts"]
+fluences  = az_result["fluence"]
 
 # ------------------------------------------------------------
 # Normalize profiles
@@ -235,7 +237,7 @@ for i, profile in enumerate(profiles_norm):
         print(f"Skipping index {i} (all NaN)")
         continue
 
-    input_file = Path(data_dict["file_names"][i])
+    input_file = Path(az_result["file_names"][i])
     filename = input_file.with_suffix(".dat").name
     output_file = SAVE_PATH / filename
 
