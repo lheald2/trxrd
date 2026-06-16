@@ -33,6 +33,9 @@ dependencies:
   # Notebooks and visualization
   - ipykernel
   - ipython
+  - ipympl
+  - ipywidgets
+  - widgetsnbextension
   - plotly
   - tqdm
   - lxml
@@ -53,12 +56,6 @@ dependencies:
       - hdf5plugin
       - pyopencl
       - pytools
-
-      # Interactive widgets
-      - ipympl
-      - ipywidgets
-      - jupyterlab-widgets
-      - widgetsnbextension
 
       # Utilities
       - numexpr

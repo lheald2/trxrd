@@ -70,7 +70,7 @@ from scipy.optimize import least_squares
 
 from diffpy.srfit.fitbase import FitContribution, FitRecipe, FitResults, Profile
 from diffpy.srfit.pdf import PDFParser, PDFGenerator
-from diffpy.structure.parsers import get_parser
+from diffpy.structure.parsers import getParser as get_parser
 from diffpy.srfit.structure import constrainAsSpaceGroup
 
 
@@ -1336,7 +1336,7 @@ def _make_recipe(
         initial_params = {}
 
     p_cif = get_parser("cif")
-    stru = p_cif.parse_file(str(config.cif_path))
+    stru = p_cif.parseFile(str(config.cif_path))
 
     profile = Profile()
     parser  = PDFParser()
@@ -1419,8 +1419,8 @@ def _make_dgr_recipe(
 
     # ---- Parse structure twice — independent copies for the two generators ----
     p_cif = get_parser("cif")
-    stru_pert = p_cif.parse_file(str(config.cif_path))
-    stru_ref  = p_cif.parse_file(str(config.cif_path))
+    stru_pert = p_cif.parseFile(str(config.cif_path))
+    stru_ref  = p_cif.parseFile(str(config.cif_path))
 
     # ---- Load time-resolved data, then replace y with ΔG_data ----
     profile = Profile()
@@ -1600,7 +1600,7 @@ def _make_multiphase_recipe(
     structures: list = []
     for i, phase in enumerate(config.phases):
         p_cif = get_parser("cif")
-        stru  = p_cif.parse_file(str(phase.cif_path))
+        stru  = p_cif.parseFile(str(phase.cif_path))
         gen   = PDFGenerator(f"G{i + 1}")
         gen.setStructure(stru, periodic=True)
 
